@@ -18,7 +18,7 @@ from llmanifold.store import Store
 
 @dataclass
 class FakeState:
-    mode: str = "ok"            # ok | 500 | 429 | context | badreq | empty | stream_error | midfail | think
+    mode: str = "ok"            # ok | 500 | 429 | context | badreq | empty | stream_error | midfail | think | stall
     text: str = "hello from fake"
     tool: bool = False
     delay: float = 0.0          # before the first byte
@@ -85,6 +85,11 @@ def fake_openai(state: FakeState) -> web.Application:
             resp.content_type = "text/event-stream"
             await resp.prepare(req)
             base = {"id": "c", "object": "chat.completion.chunk", "model": body.get("model")}
+            if m == "stall":   # an overloaded API: accepts the request, then only sends keep-alives
+                for _ in range(600):
+                    await resp.write(b": keep-alive\n\n")
+                    await asyncio.sleep(0.05)
+                return resp
             await resp.write(_sse({**base, "choices": [{"index": 0, "delta": {"role": "assistant"}}]}))
             if m == "stream_error":
                 await resp.write(_sse({"error": {"message": "engine crashed"}}))

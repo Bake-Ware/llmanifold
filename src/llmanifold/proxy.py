@@ -546,7 +546,10 @@ class Core:
             up["model"] = ep.model or ctx.model.name
             if ep.dialect == "responses":
                 return await self._attempt_responses(ctx, st, responder, up)
-            if ctx.stream and ep.dialect == "openai" and ep.stream_usage:
+            # always stream from upstream, even for clients that didn't ask: only a stream shows when the
+            # first token arrives, so a stalled provider can be abandoned (and fallen back from) quickly
+            up["stream"] = True
+            if ep.dialect == "openai" and ep.stream_usage:
                 # always ask the engine for token counts; stripped again for clients that didn't ask
                 up["stream_options"] = {**(up.get("stream_options") or {}), "include_usage": True}
             path = "/v1/chat/completions" if ep.dialect == "openai" else "/v1/messages"
@@ -605,31 +608,17 @@ class Core:
                     if trig == "5xx":
                         st.mark_failure(f"HTTP {resp.status}")
                     return Outcome(False, trig, resp.status, text[:2000])
-                collect = not ctx.stream and ep.dialect == "responses"   # upstream always streams
-                if not ctx.stream and not collect:
-                    try:
-                        data = await resp.json(content_type=None)
-                    except ValueError:
-                        return Outcome(False, "5xx", resp.status, "upstream returned invalid JSON")
-                    if not isinstance(data, dict) or not D.response_has_content(data, ep.dialect):
-                        return Outcome(False, "empty", resp.status, "upstream returned no content")
-                    out = D.translate_response(data, ep.dialect, ctx.dialect, ctx.requested)
-                    tin, tout = D.response_usage(data, ep.dialect)
-                    elapsed = time.monotonic() - t0
-                    await responder.send_json(200, out, st.name)
-                    st.mark_ok()
-                    st.observe(tin, tout, elapsed, None)
-                    return Outcome(True, status=200, tokens_in=tin, tokens_out=tout, committed=True)
+                collect = not ctx.stream   # upstream always streams; non-streaming clients get it gathered up
                 # streaming: hold until real content, so a fast failure can still fall back
                 if collect:
-                    tr = D.stream_translator("responses", "openai", ctx.requested, include_usage=True)
+                    tr = D.stream_translator(ep.dialect, "openai", ctx.requested, include_usage=True)
                 else:
                     tr = D.stream_translator(ep.dialect, ctx.dialect, ctx.requested,
                                              include_usage=ctx.include_usage, rename=True,
                                              strip_usage=ep.stream_usage and not ctx.include_usage)
                 parser = D.SSEParser()
                 held: list[bytes] = []
-                first_deadline = t0 + ctx.model.first_token_timeout
+                first_deadline = t0 + (ep.first_token_timeout or ctx.model.first_token_timeout)
                 ttft = None
                 it = resp.content.iter_any().__aiter__()
                 while True:

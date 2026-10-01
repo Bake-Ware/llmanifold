@@ -477,7 +477,7 @@
   // ------------------------------------------------------------- model dialog (add / edit)
   const PRESETS = {
     local: { name: '', url: 'http://127.0.0.1:8080', dialect: 'openai', model: '', max_concurrency: 1, probe: 'llamacpp', metered: false, fallback: false },
-    deepseek: { name: 'deepseek', url: 'https://api.deepseek.com', dialect: 'openai', model: 'deepseek-chat', max_concurrency: 8, context: 131072, probe: 'models', metered: true, fallback: true, overflow_at: 5 },
+    deepseek: { name: 'deepseek', url: 'https://api.deepseek.com', dialect: 'openai', model: 'deepseek-chat', max_concurrency: 8, context: 131072, probe: 'models', metered: true, fallback: true, overflow_at: 5, first_token_timeout: 30 },
     anthropic: { name: 'anthropic', url: 'https://api.anthropic.com', dialect: 'anthropic', model: '', max_concurrency: 4, context: 200000, probe: 'none', metered: true, fallback: false },
     openai: { name: 'openai', url: 'https://api.openai.com', dialect: 'openai', model: '', max_concurrency: 8, probe: 'models', metered: true, fallback: false },
     codex: { name: 'codex', url: 'https://chatgpt.com/backend-api/codex', dialect: 'responses', login: 'chatgpt', model: 'gpt-5.5', max_concurrency: 4, context: '', probe: 'none', metered: true, fallback: true, overflow_at: 5 },
@@ -487,7 +487,7 @@
   let editing = null;
   function fillModelForm(v) {
     const f = $('#model-form');
-    for (const k of ['name', 'url', 'dialect', 'login', 'model', 'max_concurrency', 'context', 'probe', 'overflow_at']) {
+    for (const k of ['name', 'url', 'dialect', 'login', 'model', 'max_concurrency', 'context', 'probe', 'overflow_at', 'first_token_timeout']) {
       if (k in v) f.elements[k].value = v[k] ?? '';
     }
     for (const k of ['metered', 'fallback']) if (k in v) f.elements[k].checked = !!v[k];
@@ -518,17 +518,18 @@
     if (name) {
       cfg = await api('/api/config');
       const sp = cfg.endpoints[name];
-      fillModelForm({ name, ...sp, context: sp.context || '', overflow_at: sp.overflow_at || '', login: sp.login || '' });
+      fillModelForm({ name, ...sp, context: sp.context || '', overflow_at: sp.overflow_at || '', login: sp.login || '',
+        first_token_timeout: sp.first_token_timeout || '' });
       f.elements.key.placeholder = sp.key_set ? 'saved; leave blank to keep it' : 'sk-…';
       $('.clear-key', f).hidden = sp.key !== 'file';
     } else {
-      fillModelForm({ overflow_at: '', login: '', ...PRESETS.local });
+      fillModelForm({ overflow_at: '', login: '', first_token_timeout: '', ...PRESETS.local });
       f.elements.key.placeholder = 'sk-…';
     }
     $('#model-dialog').showModal();
   }
   $('#model-form').elements.preset.addEventListener('change', (ev) => {
-    if (!editing) fillModelForm({ context: '', overflow_at: '', login: '', ...PRESETS[ev.target.value] });
+    if (!editing) fillModelForm({ context: '', overflow_at: '', login: '', first_token_timeout: '', ...PRESETS[ev.target.value] });
   });
   $('#test-model').addEventListener('click', async () => {
     const f = $('#model-form'), out = $('#test-result');
@@ -557,6 +558,7 @@
       probe: el.probe.value, metered: el.metered.checked, fallback: el.fallback.checked,
       overflow_at: el.overflow_at.value ? Number(el.overflow_at.value) : null,
       login: el.login.value || null,
+      first_token_timeout: el.first_token_timeout.value ? Number(el.first_token_timeout.value) : null,
     };
     if (el.key.value.trim()) body.key = el.key.value.trim();
     if (editing && el.clear_key.checked) body.clear_key = true;

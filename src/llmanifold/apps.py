@@ -662,7 +662,8 @@ async def serve(cfg: Config) -> None:
     runners = []
     try:
         for app, addr in ((build_api_app(core), cfg.api_listen), (build_admin_app(core), cfg.admin_listen)):
-            runner = web.AppRunner(app, access_log=None)
+            # handler_cancellation: when a client hangs up, stop waiting on its upstream and free the lane
+            runner = web.AppRunner(app, access_log=None, handler_cancellation=True)
             await runner.setup()
             host, port = _split(addr)
             await web.TCPSite(runner, host, port).start()

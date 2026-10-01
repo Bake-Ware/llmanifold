@@ -419,3 +419,32 @@ async def test_overflow_respects_metered_rule(stack):
     rs = await asyncio.gather(*[s.api.post("/v1/chat/completions", json=chat(text=f"q{i}")) for i in range(3)])
     assert all(r.status == 200 for r in rs)
     assert not s.fakes["f"].bodies                      # anonymous callers wait for the pool instead
+
+
+async def test_stalled_api_is_abandoned_and_fallen_back_from(stack):
+    """A provider that accepts requests but only sends keep-alives (seen with DeepSeek under load)
+    is given up on after its first_token_timeout, for streaming and non-streaming clients alike."""
+    s = await stack({"a": {"kind": "openai", "fake": {"mode": "stall"}, "first_token_timeout": 0.5},
+                     "b": {"kind": "openai", "fallback": True}},
+                    {"qwen": {"pool": ["a"], "fallback": ["b"]}})
+    import time
+    for stream in (False, True):
+        t = time.monotonic()
+        r = await s.api.post("/v1/chat/completions", json=chat(stream=stream))
+        assert r.status == 200
+        body = await r.text()
+        assert "hello" in body
+        assert time.monotonic() - t < 5
+    assert len(s.fakes["b"].bodies) == 2
+    assert s.fakes["a"].bodies[-1]["stream"] is True          # upstream is always streamed
+
+
+async def test_non_streaming_client_still_gets_plain_json(stack):
+    s = await stack(POOL2, {"qwen": {"pool": ["a", "b"]}})
+    r = await s.api.post("/v1/chat/completions", json=chat())
+    j = await r.json()
+    assert j["object"] == "chat.completion" and j["choices"][0]["message"]["content"] == "hello from fake"
+    assert j["usage"]["completion_tokens"] == 3
+    r = await s.api.post("/v1/messages", json={"model": "qwen", "max_tokens": 9, "messages": [{"role": "user", "content": "hi"}]})
+    j = await r.json()
+    assert j["type"] == "message" and j["content"][0]["text"] == "hello from fake"

@@ -225,6 +225,9 @@
     <label class="check"><input type="checkbox" name="metered"> Costs money per request
       <span class="opt">anonymous callers won't fall back to it unless a flow allows that</span></label>
     <label class="check"><input type="checkbox" name="fallback"> Only use as a fallback</label>
+    <label class="field">Give up if nothing arrives within <span class="opt">seconds; then the flow falls back. Blank: the flow's setting (5 minutes)</span>
+      <input name="first_token_timeout" type="number" min="1" step="1" placeholder="e.g. 30">
+    </label>
     <label class="field">Help clear a backlog <span class="opt">when this is a flow's fallback: take requests once this many are waiting for a lane. Blank: only when the pool fails or the longest wait runs out.</span>
       <input name="overflow_at" type="number" min="1" step="1" placeholder="e.g. 5">
     </label>

@@ -18,7 +18,7 @@ DIALECTS = ("openai", "anthropic", "responses")   # responses: OpenAI Responses 
 LOGINS = ("chatgpt",)
 PROBES = ("none", "models", "strata", "llamacpp")
 TRIGGERS = ("connect", "timeout", "slow", "5xx", "429", "4xx", "context", "empty", "queue")
-DEFAULT_TRIGGERS = ("connect", "timeout", "5xx", "429", "context", "empty", "queue")
+DEFAULT_TRIGGERS = ("connect", "timeout", "slow", "5xx", "429", "context", "empty", "queue")
 
 
 class ConfigError(ValueError):
@@ -41,6 +41,7 @@ class Endpoint:
     fallback: bool = False         # only used as a fallback, never as a first choice
     overflow_at: int | None = None # as a flow's fallback: take requests once this many are waiting for a lane
     login: str | None = None       # "chatgpt": authenticate with a ChatGPT (Codex) sign-in instead of a key
+    first_token_timeout: float | None = None  # give up (trigger "slow") if nothing arrives in this long; default: the flow's
     timeout: float = 1800.0        # whole-request read timeout (s)
     connect_timeout: float = 5.0
     stream_usage: bool = True      # ask OpenAI-style engines for token counts on streams

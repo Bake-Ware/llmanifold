@@ -269,7 +269,7 @@ class Core:
                 headers.update(await self.chatgpt.headers(login_of))
             except LoginError as e:
                 return {"ok": False, "error": str(e)}
-            models_url = url + "/models?client_version=0.99.0"
+            models_url = url + "/models?client_version=1.0.0"   # older versions are shown fewer models
         else:
             models_url = url + "/v1/models"
         if key:

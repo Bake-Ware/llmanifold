@@ -83,12 +83,14 @@
   // ------------------------------------------------------------- overview
   function laneState(e) {
     if (e.draining) return 'paused';
-    if (!e.healthy) return 'down';
+    if (!e.healthy || e.cooling_s) return 'down';
     return e.load > 0 ? 'busy' : 'idle';
   }
   function laneNow(e, st) {
     if (st === 'paused') return e.inflight ? 'paused: finishing what it already has' : 'paused: gets no new requests';
+    if (st === 'down' && e.healthy && e.cooling_s) return `stalled: skipped for ${e.cooling_s}s more, then one request at a time`;
     if (st === 'down') return e.last_error || 'not answering';
+    if (e.capacity < e.max_concurrency && !(e.current && e.current.length)) return 'idle: one request at a time until one gets an answer';
     if (e.current && e.current.length) return e.current.join(', ');
     if (e.probe_busy > e.inflight) return 'busy: serving a client that bypassed llmanifold';
     return 'idle';

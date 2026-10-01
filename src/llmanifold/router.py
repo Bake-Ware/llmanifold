@@ -18,6 +18,7 @@ from .config import Config, Endpoint, Model
 
 AFFINITY_MAX = 2048
 BUSY_FRESH = 4.0     # seconds a probed busy flag stays trustworthy
+SLOW_COOLDOWN = 60.0 # a remote API that stalled is skipped this long, then gets one request at a time
 
 
 @dataclass
@@ -40,6 +41,27 @@ class EndpointState:
     tps_ema: float | None = None   # decode speed, tokens/s
     ttft_ema: float | None = None  # seconds
     current: dict = field(default_factory=dict)   # request id -> short description
+    cooldown_until: float = 0.0    # monotonic; skipped until then (stalled remote API)
+    probation: bool = False        # after a stall: one request at a time until one succeeds
+
+    @property
+    def capacity(self) -> int:
+        return 1 if self.probation else self.cfg.max_concurrency
+
+    def mark_slow(self, error: str) -> None:
+        """A remote API accepted a request but sent nothing in time. Back off from it: skip it for a
+        while, then let one request through at a time until one gets an answer. Local pool lanes are
+        left alone (a long prompt can legitimately take a while, and probes track them)."""
+        self.errors += 1
+        self.last_error = error
+        if self.cfg.fallback or self.cfg.metered:
+            self.cooldown_until = time.monotonic() + SLOW_COOLDOWN
+            self.probation = True
+
+    def served(self) -> None:
+        """A real request got an answer."""
+        self.probation = False
+        self.cooldown_until = 0.0
 
     @property
     def name(self) -> str:
@@ -47,7 +69,7 @@ class EndpointState:
 
     @property
     def usable(self) -> bool:
-        return self.healthy and not self.draining
+        return self.healthy and not self.draining and time.monotonic() >= self.cooldown_until
 
     def load(self, now: float | None = None) -> int:
         now = now or time.monotonic()
@@ -78,7 +100,9 @@ class EndpointState:
 
     def snapshot(self) -> dict:
         return {"name": self.name, "url": self.cfg.url, "dialect": self.cfg.dialect, "model": self.cfg.model,
-                "max_concurrency": self.cfg.max_concurrency, "inflight": self.inflight,
+                "max_concurrency": self.cfg.max_concurrency, "capacity": self.capacity,
+                "cooling_s": max(0, round(self.cooldown_until - time.monotonic())) or None,
+                "inflight": self.inflight,
                 "background_inflight": self.bg_inflight, "probe_busy": self.probe_busy,
                 "load": self.load(), "healthy": self.healthy, "draining": self.draining,
                 "metered": self.cfg.metered, "fallback": self.cfg.fallback, "overflow_at": self.cfg.overflow_at, "context": self.cfg.context,
@@ -168,7 +192,7 @@ class Router:
             if sum(s.bg_inflight for s in cands) >= model.background_max_lanes:
                 return None
         now = time.monotonic()
-        free = [s for s in cands if s.load(now) < s.cfg.max_concurrency]
+        free = [s for s in cands if s.load(now) < s.capacity]
         if not free:
             return None
         pref = self._affinity.get(key) if (key and model.affinity) else None
@@ -218,7 +242,7 @@ class Router:
                     for name, n in overflow:
                         ost = self.states.get(name)
                         if (position >= n and ost is not None and ost.usable
-                                and ost.load() < ost.cfg.max_concurrency
+                                and ost.load() < ost.capacity
                                 and not (min_context and ost.cfg.context and ost.cfg.context < min_context)):
                             self._reserve(ost, background, None, rid, desc)
                             return ost
@@ -238,7 +262,7 @@ class Router:
         """Reserve a specific (fallback) endpoint if it has room right now."""
         async with self._cond:
             st = self.states.get(name)
-            if st is None or not st.usable or st.load() >= st.cfg.max_concurrency:
+            if st is None or not st.usable or st.load() >= st.capacity:
                 return None
             self._reserve(st, background, None, rid, desc)
             return st

@@ -481,6 +481,8 @@ class Core:
         tried: set[str] = set()
         # 1. the pool (or, when the queue backs up, an overflow fallback)
         tried_pool = 0
+        pool_failed = False
+        overflowed = False
         while model.pool and tried_pool < max(1, len(model.pool)):
             tried_pool += 1
             t_q = time.monotonic()
@@ -500,6 +502,7 @@ class Core:
             if st.name not in model.pool:
                 # overflow: the queue backed up, so a fallback endpoint takes this request
                 tried.add(st.name)
+                overflowed = True
                 self.counters["fallbacks"] += 1
                 ctx.attempts.append({"endpoint": "pool", "trigger": "overflow"})
                 last = await self._attempt(ctx, st, responder)
@@ -513,6 +516,7 @@ class Core:
                                  "status": last.status})
             if last.ok or last.committed or last.trigger == "client":
                 return last, st
+            pool_failed = True
             if last.trigger != "connect":
                 break       # other pool members would most likely fail the same way
         # 2. fallbacks
@@ -537,6 +541,24 @@ class Core:
                 last = out
                 if out.trigger not in model.fallback_on:
                     break
+        # 3. the request overflowed to a fallback before getting its turn at the pool, and nothing
+        #    outside the pool could answer: go back and wait for a lane rather than give up
+        if (overflowed and not pool_failed and last.trigger not in ("4xx", "context")
+                and self.router.pool_available(model, min_ctx)):
+            t_q = time.monotonic()
+            st = await self.router.acquire(model, key=ctx.key, background=ctx.background,
+                                           timeout=model.queue_timeout, rid=ctx.rid, desc=desc,
+                                           min_context=min_ctx)
+            ctx.queued += time.monotonic() - t_q
+            if st is None:
+                ctx.attempts.append({"endpoint": "pool", "trigger": "queue", "retry": True})
+                return last, None
+            out = await self._attempt(ctx, st, responder)
+            ctx.attempts.append({"endpoint": st.name, "ok": out.ok, "trigger": out.trigger,
+                                 "status": out.status, "retry": True})
+            if out.ok or out.committed or out.trigger == "client":
+                return out, st
+            last = out
         return last, None
 
     async def _attempt(self, ctx: Ctx, st: EndpointState, responder: Responder) -> Outcome:
@@ -624,12 +646,14 @@ class Core:
                 while True:
                     wait = None if content_started else first_deadline - time.monotonic()
                     if wait is not None and wait <= 0:
+                        st.mark_slow("no first token before first_token_timeout")
                         return Outcome(False, "slow", 200, "no first token before first_token_timeout")
                     try:
                         chunk = await (asyncio.wait_for(it.__anext__(), wait) if wait is not None else it.__anext__())
                     except StopAsyncIteration:
                         break
                     except asyncio.TimeoutError:
+                        st.mark_slow("no first token before first_token_timeout")
                         return Outcome(False, "slow", 200, "no first token before first_token_timeout")
                     outs: list[bytes] = []
                     for ev in parser.feed(chunk):
@@ -661,6 +685,7 @@ class Core:
                     out = D.translate_response(data, "openai", ctx.dialect, ctx.requested)
                     await responder.send_json(200, out, st.name)
                     st.mark_ok()
+                    st.served()
                     st.observe(tr.tokens_in, tr.tokens_out, time.monotonic() - t0 - (ttft or 0), ttft)
                     return Outcome(True, status=200, tokens_in=tr.tokens_in, tokens_out=tr.tokens_out,
                                    ttft=ttft, committed=True)
@@ -674,6 +699,7 @@ class Core:
                 gen = time.monotonic() - t0 - (ttft or 0)
                 tout = tr.tokens_out or tr.deltas
                 st.mark_ok()
+                st.served()
                 st.observe(tr.tokens_in, tout, gen, ttft)
                 return Outcome(True, status=200, tokens_in=tr.tokens_in, tokens_out=tout,
                                ttft=ttft, committed=True)

@@ -448,3 +448,45 @@ async def test_non_streaming_client_still_gets_plain_json(stack):
     r = await s.api.post("/v1/messages", json={"model": "qwen", "max_tokens": 9, "messages": [{"role": "user", "content": "hi"}]})
     j = await r.json()
     assert j["type"] == "message" and j["content"][0]["text"] == "hello from fake"
+
+
+async def test_stalled_overflow_backs_off_and_requests_return_to_the_pool(stack):
+    """A flood overflows to a fallback that accepts requests but never answers. Those requests go
+    back and wait for the pool instead of failing, and the fallback is skipped for a while."""
+    s = await stack({"a": {"kind": "openai", "fake": {"delay": 0.2}},
+                     "f": {"kind": "openai", "fallback": True, "overflow_at": 2, "max_concurrency": 4,
+                           "first_token_timeout": 0.3, "fake": {"mode": "stall"}}},
+                    {"qwen": {"pool": ["a"], "fallback": ["f"], "queue_timeout": 10}})
+    rs = await asyncio.gather(*[s.api.post("/v1/chat/completions", json=chat(text=f"q{i}")) for i in range(4)])
+    bodies = [await r.text() for r in rs]
+    assert all(r.status == 200 for r in rs) and all("hello from fake" in b for b in bodies)
+    assert len(s.fakes["a"].bodies) == 4                   # every request was answered by the pool
+    stalled = len(s.fakes["f"].bodies)
+    assert stalled >= 1
+    f = s.core.router.states["f"]
+    assert not f.usable and f.probation and f.capacity == 1
+    rs = await asyncio.gather(*[s.api.post("/v1/chat/completions", json=chat(text=f"r{i}")) for i in range(4)])
+    assert all(r.status == 200 for r in rs)
+    assert len(s.fakes["f"].bodies) == stalled             # cooling down: not tried again
+    await asyncio.sleep(0.1)
+    retried = [r for r in s.core.recent if any(a.get("retry") for a in r["attempts"])]
+    assert len(retried) == stalled
+
+
+async def test_probation_lets_one_request_through_until_one_succeeds(stack):
+    s = await stack({"a": {"kind": "openai"}, "f": {"kind": "openai", "fallback": True, "max_concurrency": 4}},
+                    {"qwen": {"pool": ["a"], "fallback": ["f"]}})
+    f = s.core.router.states["f"]
+    f.mark_slow("stalled")
+    assert not f.usable
+    f.cooldown_until = 0                                   # cooldown over
+    assert f.usable and f.capacity == 1
+    assert await s.core.router.try_endpoint("f", background=False, rid="x") is f
+    assert await s.core.router.try_endpoint("f", background=False, rid="y") is None
+    await s.core.router.release(f, False, "x")
+    f.served()
+    assert f.capacity == 4
+    # pool lanes are never benched for being slow
+    a = s.core.router.states["a"]
+    a.mark_slow("long prompt")
+    assert a.usable and not a.probation

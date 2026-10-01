@@ -22,7 +22,10 @@ Anthropic API shapes on the way.
   the client; streams are held until the first token so a failed start can be
   retried elsewhere. A fallback can also help with load: `overflow_at: 5` sends
   requests to it once five are waiting for a lane, so the queue never grows
-  past four while it has room.
+  past four while it has room. A remote API that accepts requests but sends
+  nothing before its `first_token_timeout` is skipped for a minute, then gets one
+  request at a time until one is answered; requests it held go back to wait for
+  the pool instead of failing.
 - **Metered endpoints.** Mark paid APIs `metered: true`. Open models don't fall
   back to them for anonymous callers unless you allow it, and a webhook fires
   whenever one serves a request (so a bot can tell you).

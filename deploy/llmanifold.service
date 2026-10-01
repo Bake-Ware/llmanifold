@@ -1,0 +1,27 @@
+# systemd unit. Assumes a venv at /opt/llmanifold/venv and config in /etc/llmanifold.
+#   python3 -m venv /opt/llmanifold/venv
+#   /opt/llmanifold/venv/bin/pip install git+https://github.com/Bake-Ware/llmanifold
+#   install -m 640 config.yaml /etc/llmanifold/config.yaml
+# API keys referenced by key_env go in /etc/llmanifold/env (KEY=value lines, mode 600).
+[Unit]
+Description=llmanifold LLM router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=llmanifold
+WorkingDirectory=/var/lib/llmanifold
+EnvironmentFile=-/etc/llmanifold/env
+ExecStart=/opt/llmanifold/venv/bin/llmanifold serve -c /etc/llmanifold/config.yaml
+Restart=on-failure
+RestartSec=2
+# history and tokens live in data_dir; make it /var/lib/llmanifold in the config
+StateDirectory=llmanifold
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

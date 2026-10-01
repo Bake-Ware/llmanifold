@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llmanifold</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;450;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<aside class="side">
+  <div class="brand">LLMANIFOLD</div>
+  <nav>
+    <a href="#overview" data-view="overview" class="active">Overview</a>
+    <a href="#requests" data-view="requests">Requests</a>
+    <a href="#access" data-view="access">Models and tokens</a>
+  </nav>
+  <div class="side-foot"><span id="who">checking access</span><span id="ver"></span></div>
+</aside>
+
+<main>
+  <header class="top">
+    <div class="heading">
+      <h1 id="title">Overview</h1>
+      <p id="subtitle">Live lanes, queue and recent traffic</p>
+    </div>
+    <div class="top-meta"><span class="dot" id="live-dot"></span><span id="live">connecting</span></div>
+  </header>
+
+  <div class="banner" id="banner" hidden></div>
+
+  <section class="view" id="view-overview">
+    <div class="tiles" id="tiles"></div>
+    <div class="manifold" id="manifold"></div>
+    <section class="panel">
+      <h2>Waiting for a lane</h2>
+      <div id="queue" class="queue"></div>
+    </section>
+  </section>
+
+  <section class="view" id="view-requests" hidden>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Recent requests</h2>
+        <label class="filter">Show <select id="req-filter">
+          <option value="all">all</option><option value="errors">failures</option>
+          <option value="fallback">fallbacks</option><option value="metered">metered</option>
+        </select></label>
+      </div>
+      <div class="table-wrap"><table class="grid" id="requests">
+        <thead><tr><th>Time</th><th>Model</th><th>Served by</th><th>Client</th><th>Tokens in / out</th>
+          <th>First token</th><th>Speed</th><th>Result</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </section>
+  </section>
+
+  <section class="view" id="view-access" hidden>
+    <section class="panel">
+      <h2>Models</h2>
+      <p class="muted">A model is <b>open</b> (anyone who can reach the API may use it) or needs a <b>token</b>.
+        Only a person signed in through the admin site can change this.</p>
+      <div class="table-wrap"><table class="grid" id="models">
+        <thead><tr><th>Model</th><th>Routes to</th><th>Falls back on</th><th>Access</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>Tokens</h2></div>
+      <form id="token-form" class="token-form">
+        <label>Label <input name="label" required placeholder="home-agent" autocomplete="off"></label>
+        <label>Models <input name="models" placeholder="* for all, or qwen,other" autocomplete="off"></label>
+        <label class="check"><input type="checkbox" name="background"> Background traffic</label>
+        <button type="submit">Create token</button>
+      </form>
+      <div class="new-token" id="new-token" hidden></div>
+      <div class="table-wrap"><table class="grid" id="tokens">
+        <thead><tr><th>Label</th><th>Starts with</th><th>Models</th><th>Priority</th><th>Used</th><th>Last used</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </section>
+  </section>
+</main>
+
+<dialog id="confirm" class="confirm">
+  <form method="dialog">
+    <h2 id="confirm-title"></h2>
+    <p id="confirm-text" class="muted"></p>
+    <div class="dialog-actions">
+      <button value="cancel" class="secondary">Cancel</button>
+      <button value="ok" id="confirm-ok">Confirm</button>
+    </div>
+  </form>
+</dialog>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llmanifold</title>
+<!-- Rook dashboard panel. Talks to the plugin only through its caps, via the
+     host-provided window.rook.call(cap, args). Mounting arrives with Rook's
+     plugin panels (wave 2); until then this page just explains itself. -->
+<style>
+  :root { --bg:#101310; --panel:#151914; --line:#2b322a; --line2:#444a3c; --tick:#6d735f; --fg:#e2e3d9;
+    --dim:#92998c; --accent:#d8ad6d; --green:#a4bc92; --bad:#dca58d;
+    --mono:'IBM Plex Mono', ui-monospace, monospace; --sans:'DM Sans', system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 13px/1.5 var(--sans); }
+  h2 { margin: 0 0 10px; font: 500 10px var(--mono); letter-spacing: 1px; text-transform: uppercase; color: var(--accent); }
+  .box { position: relative; border: 1px solid var(--line); background: var(--panel); padding: 12px 14px; margin-bottom: 12px; }
+  .box::before { content:''; position:absolute; top:-1px; left:-1px; width:5px; height:5px;
+    border-top:1px solid var(--tick); border-left:1px solid var(--tick); }
+  .lane { display: grid; grid-template-columns: 10px 1fr auto auto; gap: 10px; align-items: center; padding: 6px 0;
+    border-bottom: 1px solid var(--line); }
+  .lane:last-child { border-bottom: 0; }
+  .st { width: 8px; height: 8px; background: var(--line2); }
+  .idle .st { background: var(--green); } .busy .st { background: var(--accent); }
+  .down .st, .draining .st { background: var(--bad); }
+  .mono { font: 11px var(--mono); color: var(--dim); }
+  button { font: 10px var(--mono); padding: 4px 8px; background: #292b20; border: 1px solid #514b35; color: var(--accent);
+    cursor: pointer; border-radius: 0; }
+  .muted { color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="box"><h2>Endpoints</h2><div id="lanes" class="muted">Loading…</div></div>
+<div class="box"><h2>Recent requests</h2><div id="reqs" class="muted"></div></div>
+<script>
+const call = window.rook && window.rook.call;
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function refresh() {
+  if (!call) {
+    document.getElementById('lanes').textContent =
+      'This panel runs inside the Rook dashboard. Use llmanifold.status from an agent, or open the llmanifold admin site.';
+    return;
+  }
+  try {
+    const eps = await call('llmanifold.endpoints', {});
+    document.getElementById('lanes').innerHTML = eps.map(e => `
+      <div class="lane ${e.state}">
+        <span class="st" title="${e.state}"></span>
+        <span>${esc(e.name)}<br><span class="mono">${esc(e.state)}${e.current.length ? ' · ' + esc(e.current[0]) : ''}</span></span>
+        <span class="mono">${e.tps ? e.tps + ' t/s' : ''}</span>
+        <button data-ep="${esc(e.name)}" data-act="${e.state === 'draining' ? 'undrain' : 'drain'}">
+          ${e.state === 'draining' ? 'Resume' : 'Drain'}</button>
+      </div>`).join('') || 'No endpoints configured.';
+    const reqs = await call('llmanifold.requests', {limit: 8});
+    document.getElementById('reqs').innerHTML = reqs.map(r =>
+      `<div class="mono">${new Date(r.ts * 1000).toLocaleTimeString()} ${esc(r.model)} → ${esc(r.endpoint || 'none')} ` +
+      `${r.ok ? '' : '<span style="color:var(--bad)">' + esc(r.error) + '</span>'}</div>`).join('') || 'No requests yet.';
+  } catch (err) {
+    document.getElementById('lanes').textContent = 'llmanifold is not reachable: ' + err;
+  }
+}
+document.addEventListener('click', async ev => {
+  const b = ev.target.closest('button[data-ep]');
+  if (!b || !call) return;
+  b.disabled = true;
+  try { await call('llmanifold.' + b.dataset.act, {endpoint: b.dataset.ep}); } finally { refresh(); }
+});
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>

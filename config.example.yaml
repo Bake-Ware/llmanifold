@@ -1,0 +1,87 @@
+# llmanifold example config. Copy to config.yaml and edit.
+# The file is watched: endpoint, model and admin changes apply without a restart.
+# Listen addresses and data_dir are read once at start.
+
+listen:
+  api: 0.0.0.0:1234          # OpenAI- and Anthropic-compatible API (what clients point at)
+  admin: 127.0.0.1:1240      # dashboard + admin API; keep it private or behind an auth proxy
+
+data_dir: ./data             # SQLite: tokens, per-model auth overrides, request history
+history_days: 30
+keepalive_after: 15          # seconds of silence before sending keepalives (proxies time out idle streams)
+
+# ---------------------------------------------------------------- endpoints
+# An endpoint is one place a request can be sent. `url` is the base URL
+# (with or without /v1). `dialect` is the API it speaks; llmanifold
+# translates between OpenAI and Anthropic shapes in both directions.
+endpoints:
+  gpu0:
+    url: http://127.0.0.1:8080
+    dialect: openai
+    max_concurrency: 1       # a single-sequence engine is one lane
+    context: 262144
+    probe: llamacpp          # none | models | strata | llamacpp (llamacpp/strata also report busy)
+  gpu1:
+    url: http://127.0.0.1:8081
+    dialect: openai
+    max_concurrency: 1
+    context: 262144
+    probe: llamacpp
+
+  deepseek:
+    url: https://api.deepseek.com
+    dialect: openai
+    model: deepseek-chat     # name sent upstream, whatever the client asked for
+    key_env: DEEPSEEK_API_KEY
+    max_concurrency: 8
+    context: 65536
+    metered: true            # costs money: fires the `metered` webhook when used
+    fallback: true           # never a first choice
+
+  claude:
+    url: https://api.anthropic.com
+    dialect: anthropic
+    model: claude-sonnet-4-5
+    key_file: ~/.config/llmanifold/anthropic.key
+    max_concurrency: 4
+    metered: true
+
+# ---------------------------------------------------------------- models
+# A model is what clients ask for. Requests go to the least-loaded endpoint in
+# `pool`; if the pool can't answer (see fallback_on) the `fallback` endpoints
+# are tried in order. Fallback only happens before any content has reached
+# the client, so a stream is never spliced from two models.
+models:
+  local-large:
+    aliases: [default, gpt-4o]           # other names clients may use
+    pool: [gpu0, gpu1]
+    fallback: [deepseek]
+    fallback_on: [connect, timeout, 5xx, 429, context, empty, queue]
+    queue_timeout: 120                   # wait this long for a free lane before falling back
+    first_token_timeout: 300
+    background_max_lanes: 1              # requests marked background may hold at most one lane
+    auth: open                           # open | token (people can change this in the admin site)
+    allow_metered_unauthenticated: false # open callers don't get the metered fallback
+
+  sonnet:
+    pool: [claude]
+    auth: token
+
+# ---------------------------------------------------------------- webhooks
+# Called (POST, JSON) when a metered endpoint serves a request. The payload has
+# model, endpoint, client, token counts, the attempt trail and a `text` line.
+webhooks: []
+#  - url: http://127.0.0.1:9000/hooks/llmanifold
+#    headers: {Authorization: "Bearer change-me"}
+#    events: [metered]
+
+# ---------------------------------------------------------------- admin access
+admin:
+  allow_from: ["127.0.0.0/8", "::1/128"]   # who may reach the admin listener directly
+  # When the admin site sits behind an auth proxy (e.g. Cloudflare Access),
+  # list the proxy's address here. Requests from it must carry the signed-in
+  # user's email in `human_header`; those users can manage tokens and auth.
+  trusted_proxies: []
+  human_header: Cf-Access-Authenticated-User-Email
+  allowed_emails: []                   # empty: anyone the proxy vouches for
+  local_humans: false                  # true: loopback callers may manage tokens too

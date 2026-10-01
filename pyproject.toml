@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmanifold"
+version = "0.1.0"
+description = "One front door for many LLM endpoints: pools, fallbacks, OpenAI/Anthropic translation, and a dashboard."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = ["aiohttp>=3.9", "PyYAML>=6"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-aiohttp>=1.0"]
+
+[project.scripts]
+llmanifold = "llmanifold.cli:main"
+
+# Loaded by Rook workers that use the plugin API (rook beta, core API >= 1.1).
+[project.entry-points."rook.plugins"]
+llmanifold = "llmanifold_rook.plugin:PLUGIN"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+llmanifold = ["static/*"]
+llmanifold_rook = ["*.html"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

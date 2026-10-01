@@ -344,7 +344,7 @@ class Core:
                 now = time.monotonic()
                 jobs = []
                 for st in list(self.router.states.values()):
-                    if st.cfg.probe == "none":
+                    if st.cfg.probe == "none" and not st.cfg.login:
                         continue
                     busy_probe = st.cfg.probe in ("strata", "llamacpp")
                     due = (now - last_health.get(st.name, 0)) >= self.cfg.health_interval

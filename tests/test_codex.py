@@ -118,6 +118,9 @@ async def test_device_sign_in_then_requests(stack, aiohttp_server):
     s, fake, base = await _setup(stack, aiohttp_server)
     r = await s.api.post("/v1/chat/completions", json=chat())
     assert r.status in (502, 503)                         # not signed in yet: the flow can't use it
+    await asyncio.sleep(2.3)                              # the probe loop marks it down until someone signs in
+    assert not s.core.router.states["codex"].healthy
+    assert "not signed in" in s.core.router.states["codex"].last_error
     j = await (await s.admin.post("/api/endpoints/codex/chatgpt/start")).json()
     assert j["user_code"] == "ABCD-1234" and j["url"].endswith("/codex/device")
     for _ in range(50):

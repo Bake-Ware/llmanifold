@@ -67,6 +67,7 @@ class ChatGPTLogins:
         self._locks: dict[str, asyncio.Lock] = {}
         self._pending: dict[str, dict] = {}       # endpoint -> device login in progress
         self._tasks: dict[str, asyncio.Task] = {}
+        self.on_signed_in = None                  # callback(endpoint name) after a good sign-in or refresh
 
     # ---------------------------------------------------------------- storage
     def _path(self, name: str) -> Path:
@@ -91,6 +92,8 @@ class ChatGPTLogins:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f)
         os.replace(tmp, p)
+        if self.on_signed_in and data.get("refresh_token") and not data.get("last_error"):
+            self.on_signed_in(name)
         return data
 
     def logout(self, name: str) -> None:

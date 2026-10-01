@@ -211,6 +211,7 @@ class Core:
         self.router = Router(cfg, set(store.paused()))
         self.editor = ConfigEditor(cfg.path, cfg.data_dir) if cfg.path else None
         self.chatgpt = ChatGPTLogins(cfg.data_dir)
+        self.chatgpt.on_signed_in = self._signed_in
         self.session: aiohttp.ClientSession | None = None
         self.recent: deque[dict] = deque(maxlen=500)
         self.started = time.time()
@@ -241,6 +242,13 @@ class Core:
         self.cfg = cfg
         self.router.update(cfg)
         self.reload_error = None
+
+    def _signed_in(self, name: str) -> None:
+        st = self.router.states.get(name)
+        if st is not None:
+            st.mark_ok()
+            st.last_error = None
+            self.router.wake()
 
     async def set_paused(self, name: str, paused: bool, by: str | None) -> bool:
         """Pause (stop routing new requests to) or resume an endpoint. Survives restarts."""

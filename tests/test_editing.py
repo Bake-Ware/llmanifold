@@ -163,6 +163,8 @@ async def test_page_and_assets_are_cache_safe(stack):
     assert js and re.search(r'/static/style\.css\?v=' + js.group(1), html)
     r = await s.admin.get(f"/static/app.js?v={js.group(1)}")
     assert r.status == 200 and "immutable" in r.headers["Cache-Control"]
+    assert f'/static/art.js?v={js.group(1)}' in html
+    assert (await s.admin.get(f"/static/art.js?v={js.group(1)}")).status == 200
     assert (await s.admin.get("/api/status")).headers["Cache-Control"] == "no-store"
 
 

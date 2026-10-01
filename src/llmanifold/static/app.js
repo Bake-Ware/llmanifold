@@ -810,6 +810,7 @@
       document.body.classList.toggle('can-edit', canEdit());
       $('#who').textContent = who.human ? (who.email || 'signed in') : `view, pause and resume only (${who.ip})`;
       $('#ver').textContent = 'v' + status.version;
+      window.manifoldArt?.setLoad(status.endpoints.reduce((n, e) => n + (e.inflight || 0), 0));
       if (status.reload_error) banner('The config file has an error, so the previous config is still in use: ' + status.reload_error);
       else if (who.human && !status.editable) banner('llmanifold can’t write its config file, so models and flows can only be changed by editing it.');
       if (!$$('dialog').some((d) => d.open)) await refreshView();

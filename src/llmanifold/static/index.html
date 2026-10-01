@@ -9,6 +9,11 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<div class="manifold-art" id="manifold-art" aria-hidden="true">
+  <canvas></canvas>
+  <div class="plate-number">FIG. 1</div>
+  <div class="plate-caption"><b>TRIBAR · 120 VOXELS</b><br>three right angles; it only closes from one side</div>
+</div>
 <aside class="side">
   <div class="brand">LLMANIFOLD</div>
   <nav>
@@ -16,7 +21,7 @@
     <a href="#requests" data-view="requests">Requests</a>
     <a href="#access" data-view="access">Models and tokens</a>
   </nav>
-  <div class="side-foot"><span id="who">checking access</span><span id="ver"></span></div>
+  <div class="side-foot"><span id="who">checking access</span><span id="ver"></span><button class="art-toggle" id="art-toggle" type="button" hidden>Pause artwork</button></div>
 </aside>
 
 <main>
@@ -278,6 +283,7 @@
 </dialog>
 
 <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+<script src="/static/art.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

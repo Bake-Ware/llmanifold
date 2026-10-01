@@ -211,7 +211,7 @@ def _index_html() -> str:
     fp = _fingerprint()
     if _INDEX is None or _INDEX[0] != fp:
         html = (STATIC / "index.html").read_text()
-        for name in ("style.css", "app.js"):
+        for name in ("style.css", "app.js", "art.js"):
             html = html.replace(f"/static/{name}", f"/static/{name}?v={fp}")
         _INDEX = (fp, html)
     return _INDEX[1]

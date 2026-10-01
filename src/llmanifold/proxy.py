@@ -23,6 +23,7 @@ from aiohttp import web
 
 from . import dialects as D
 from .config import Config, Model
+from .chatgpt import ChatGPTLogins, LoginError
 from .editor import ConfigEditor
 from .router import EndpointState, Router
 from .store import Store
@@ -209,6 +210,7 @@ class Core:
         self.store = store
         self.router = Router(cfg, set(store.paused()))
         self.editor = ConfigEditor(cfg.path, cfg.data_dir) if cfg.path else None
+        self.chatgpt = ChatGPTLogins(cfg.data_dir)
         self.session: aiohttp.ClientSession | None = None
         self.recent: deque[dict] = deque(maxlen=500)
         self.started = time.time()
@@ -220,6 +222,7 @@ class Core:
     # ---------------------------------------------------------------- lifecycle
     async def start(self) -> None:
         self.session = aiohttp.ClientSession(auto_decompress=True)
+        self.chatgpt.session = self.session
         self._tasks.append(asyncio.create_task(self._probe_loop()))
         self._tasks.append(asyncio.create_task(self._prune_loop()))
 
@@ -246,12 +249,21 @@ class Core:
         await asyncio.to_thread(self.store.set_paused, name, paused, by)
         return True
 
-    async def test_endpoint(self, url: str, dialect: str, key: str | None) -> dict:
-        """Ask an endpoint which models it serves: proves the URL and key work before saving."""
+    async def test_endpoint(self, url: str, dialect: str, key: str | None, login_of: str | None = None) -> dict:
+        """Ask an endpoint which models it serves: proves the URL and key work before saving.
+        `login_of` names an endpoint whose ChatGPT sign-in to use (the Codex backend)."""
         url = url.rstrip("/")
         if url.endswith("/v1"):
             url = url[:-3]
         headers = {}
+        if login_of:
+            try:
+                headers.update(await self.chatgpt.headers(login_of))
+            except LoginError as e:
+                return {"ok": False, "error": str(e)}
+            models_url = url + "/models?client_version=0.99.0"
+        else:
+            models_url = url + "/v1/models"
         if key:
             if dialect == "anthropic":
                 headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
@@ -261,7 +273,7 @@ class Core:
             headers["anthropic-version"] = "2023-06-01"
         t0 = time.monotonic()
         try:
-            async with self.session.get(url + "/v1/models", headers=headers,
+            async with self.session.get(models_url, headers=headers,
                                         timeout=aiohttp.ClientTimeout(total=10, sock_connect=5)) as r:
                 text = await r.text()
                 ms = int((time.monotonic() - t0) * 1000)
@@ -272,8 +284,8 @@ class Core:
                     data = json.loads(text)
                 except ValueError:
                     return {"ok": False, "ms": ms, "error": "answered, but not with JSON: is this the API's base URL?"}
-                items = data.get("data") if isinstance(data, dict) else data
-                ids = [m.get("id") for m in items or [] if isinstance(m, dict) and m.get("id")]
+                items = (data.get("data") or data.get("models")) if isinstance(data, dict) else data
+                ids = [m.get("id") or m.get("slug") for m in items or [] if isinstance(m, dict) and (m.get("id") or m.get("slug"))]
                 return {"ok": True, "ms": ms, "models": ids[:200]}
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}".rstrip(": ")}
@@ -281,6 +293,17 @@ class Core:
     # ---------------------------------------------------------------- health + busy probes
     async def probe(self, st: EndpointState) -> None:
         ep = st.cfg
+        if ep.login:
+            # signed-in endpoints have no cheap health check; their sign-in is the health
+            s = self.chatgpt.status(ep.name)
+            if s["signed_in"] and not s.get("last_error"):
+                if not st.healthy or st.last_error:
+                    st.mark_ok()
+                    st.last_error = None
+            else:
+                st.healthy = False
+                st.last_error = s.get("last_error") or "not signed in to ChatGPT: sign in from the admin site"
+            return
         if ep.probe == "none":
             return
         path = {"models": "/v1/models", "strata": "/status", "llamacpp": "/slots"}[ep.probe]
@@ -513,6 +536,8 @@ class Core:
         try:
             up = D.translate_request(ctx.body, ctx.dialect, ep.dialect)
             up["model"] = ep.model or ctx.model.name
+            if ep.dialect == "responses":
+                return await self._attempt_responses(ctx, st, responder, up)
             if ctx.stream and ep.dialect == "openai" and ep.stream_usage:
                 # always ask the engine for token counts; stripped again for clients that didn't ask
                 up["stream_options"] = {**(up.get("stream_options") or {}), "include_usage": True}
@@ -534,6 +559,30 @@ class Core:
         finally:
             await self.router.release(st, ctx.background, ctx.rid)
 
+    async def _attempt_responses(self, ctx: Ctx, st: EndpointState, responder: Responder, up: dict) -> Outcome:
+        """OpenAI Responses API, with an API key or a ChatGPT (Codex) sign-in."""
+        ep = st.cfg
+        path = "/responses" if "/backend-api/" in ep.url else "/v1/responses"
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream",
+                   "OpenAI-Beta": "responses=experimental", "originator": "llmanifold"}
+        for attempt in (1, 2):
+            if ep.login == "chatgpt":
+                try:
+                    headers.update(await self.chatgpt.headers(ep.name, force_refresh=attempt == 2))
+                except LoginError as e:
+                    st.mark_failure(str(e), immediate=True)
+                    return Outcome(False, "connect", error=f"{ep.name}: {e}")
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    return Outcome(False, "connect", error=f"{ep.name}: sign-in refresh: {type(e).__name__}")
+            elif ep.api_key():
+                headers["Authorization"] = f"Bearer {ep.api_key()}"
+            headers.update(ep.headers)
+            out = await self._call(ctx, st, responder, ep.url + path, up, headers)
+            # an expired sign-in shows up as 401: refresh once and retry
+            if not (ep.login == "chatgpt" and out.status == 401 and not out.committed and attempt == 1):
+                return out
+        return out
+
     async def _call(self, ctx: Ctx, st: EndpointState, responder: Responder, url: str, up: dict,
                     headers: dict) -> Outcome:
         ep = st.cfg
@@ -548,7 +597,8 @@ class Core:
                     if trig == "5xx":
                         st.mark_failure(f"HTTP {resp.status}")
                     return Outcome(False, trig, resp.status, text[:2000])
-                if not ctx.stream:
+                collect = not ctx.stream and ep.dialect == "responses"   # upstream always streams
+                if not ctx.stream and not collect:
                     try:
                         data = await resp.json(content_type=None)
                     except ValueError:
@@ -563,9 +613,12 @@ class Core:
                     st.observe(tin, tout, elapsed, None)
                     return Outcome(True, status=200, tokens_in=tin, tokens_out=tout, committed=True)
                 # streaming: hold until real content, so a fast failure can still fall back
-                tr = D.stream_translator(ep.dialect, ctx.dialect, ctx.requested,
-                                         include_usage=ctx.include_usage, rename=True,
-                                         strip_usage=ep.stream_usage and not ctx.include_usage)
+                if collect:
+                    tr = D.stream_translator("responses", "openai", ctx.requested, include_usage=True)
+                else:
+                    tr = D.stream_translator(ep.dialect, ctx.dialect, ctx.requested,
+                                             include_usage=ctx.include_usage, rename=True,
+                                             strip_usage=ep.stream_usage and not ctx.include_usage)
                 parser = D.SSEParser()
                 held: list[bytes] = []
                 first_deadline = t0 + ctx.model.first_token_timeout
@@ -588,17 +641,32 @@ class Core:
                         if tr.error:
                             return Outcome(False, "5xx", 200, f"upstream stream error: {tr.error}")
                         held += outs
-                        if tr.has_content:
+                        if tr.has_content and not collect:
                             ttft = time.monotonic() - t0
                             await responder.start_stream(st.name)
                             content_started = True
                             await responder.write(b"".join(held))
                             held = []
+                        elif tr.has_content and ttft is None:
+                            ttft = time.monotonic() - t0
                     elif outs:
                         await responder.write(b"".join(outs))
                 outs = []
                 for ev in parser.flush():
                     outs += tr.feed(*ev)
+                if collect:
+                    held += outs + tr.finish()
+                    if tr.error:
+                        return Outcome(False, "5xx", 200, f"upstream stream error: {tr.error}")
+                    if not tr.has_content:
+                        return Outcome(False, "empty", 200, "upstream stream ended without content")
+                    data = D.collect_openai_chunks(held, ctx.requested)
+                    out = D.translate_response(data, "openai", ctx.dialect, ctx.requested)
+                    await responder.send_json(200, out, st.name)
+                    st.mark_ok()
+                    st.observe(tr.tokens_in, tr.tokens_out, time.monotonic() - t0 - (ttft or 0), ttft)
+                    return Outcome(True, status=200, tokens_in=tr.tokens_in, tokens_out=tr.tokens_out,
+                                   ttft=ttft, committed=True)
                 if not content_started:
                     if tr.error:
                         return Outcome(False, "5xx", 200, f"upstream stream error: {tr.error}")

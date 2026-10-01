@@ -40,6 +40,16 @@ endpoints:
     fallback: true           # never a first choice
     overflow_at: 5           # also take requests once 5 are waiting for a lane (clears a backlog)
 
+  codex:                     # a ChatGPT plan through the Codex backend; sign in from the admin site
+    url: https://chatgpt.com/backend-api/codex
+    dialect: responses
+    login: chatgpt
+    model: gpt-5.5
+    max_concurrency: 4
+    probe: none
+    metered: true
+    fallback: true
+
   claude:
     url: https://api.anthropic.com
     dialect: anthropic

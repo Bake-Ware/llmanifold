@@ -216,6 +216,9 @@ def anthropic_to_openai_request(body: dict) -> dict:
 
 
 def translate_request(body: dict, src: str, dst: str) -> dict:
+    if dst == "responses":
+        chat = body if src == "openai" else translate_request(body, src, "openai")
+        return openai_to_responses_request(chat)
     if src == dst:
         return dict(body)
     if src == "openai" and dst == "anthropic":
@@ -651,6 +654,9 @@ class AnthropicToOpenAIStream(_StreamBase):
 def stream_translator(src: str, dst: str, model: str | None, include_usage: bool = False,
                       rename: bool = False, strip_usage: bool = False) -> _StreamBase:
     """`src` is the endpoint's dialect, `dst` the client's."""
+    if src == "responses":
+        first = ResponsesToOpenAIStream(model, include_usage=include_usage or dst != "openai")
+        return first if dst == "openai" else Chain(first, stream_translator("openai", dst, model))
     if src == dst == "openai":
         return OpenAIPassthrough(model, rename, strip_usage)
     if src == dst == "anthropic":
@@ -660,3 +666,265 @@ def stream_translator(src: str, dst: str, model: str | None, include_usage: bool
     if src == "anthropic" and dst == "openai":
         return AnthropicToOpenAIStream(model, include_usage)
     raise ValueError(f"no translation {src} -> {dst}")
+
+
+# ---------------------------------------------------------------- OpenAI Responses API (upstream only)
+# Used for OpenAI's Responses API and for the ChatGPT/Codex backend. Clients never speak it to
+# llmanifold; their OpenAI-chat or Anthropic requests are translated (via the chat shape) and the
+# event stream comes back as chat chunks.
+
+REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
+
+
+def _responses_user_content(content: Any) -> list[dict]:
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}]
+    parts = []
+    for p in content or []:
+        if not isinstance(p, dict):
+            continue
+        if p.get("type") == "text":
+            parts.append({"type": "input_text", "text": p.get("text", "")})
+        elif p.get("type") == "image_url":
+            url = p.get("image_url")
+            url = url.get("url") if isinstance(url, dict) else url
+            if url:
+                parts.append({"type": "input_image", "image_url": url})
+    return parts
+
+
+def openai_to_responses_request(body: dict) -> dict:
+    instructions: list[str] = []
+    items: list[dict] = []
+    for m in body.get("messages") or []:
+        role, c = m.get("role"), m.get("content")
+        if role in ("system", "developer"):
+            t = text_of(c)
+            if t:
+                instructions.append(t)
+        elif role == "user":
+            parts = _responses_user_content(c)
+            if parts:
+                items.append({"type": "message", "role": "user", "content": parts})
+        elif role == "assistant":
+            t = text_of(c)
+            if t:
+                items.append({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": t}]})
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                items.append({"type": "function_call", "call_id": tc.get("id") or _id("call_"),
+                              "name": fn.get("name", ""), "arguments": fn.get("arguments") or "{}"})
+        elif role == "tool":
+            items.append({"type": "function_call_output", "call_id": m.get("tool_call_id") or "",
+                          "output": text_of(c)})
+    out: dict[str, Any] = {
+        "model": body.get("model"),
+        "instructions": "\n\n".join(instructions) or DEFAULT_INSTRUCTIONS,
+        "input": items,
+        "stream": True,                 # the ChatGPT backend only streams; non-stream clients get it collected
+        "store": False,
+        "parallel_tool_calls": bool(body.get("parallel_tool_calls", True)),
+        "tool_choice": "auto",
+    }
+    tools = [t for t in body.get("tools") or [] if (t.get("type") == "function" and t.get("function"))]
+    if tools:
+        out["tools"] = [{"type": "function", "name": t["function"].get("name"),
+                         "description": t["function"].get("description", ""),
+                         "parameters": t["function"].get("parameters") or {"type": "object", "properties": {}},
+                         "strict": False} for t in tools]
+    tc = body.get("tool_choice")
+    if tc in ("auto", "none", "required"):
+        out["tool_choice"] = tc
+    elif isinstance(tc, dict) and (tc.get("function") or {}).get("name"):
+        out["tool_choice"] = {"type": "function", "name": tc["function"]["name"]}
+    effort = body.get("reasoning_effort") or (body.get("reasoning") or {}).get("effort")
+    out["reasoning"] = {"summary": "auto", **({"effort": effort} if effort in REASONING_EFFORTS else {})}
+    return out
+
+
+class ResponsesToOpenAIStream(_StreamBase):
+    """Responses API events in, OpenAI chat-completion chunks out."""
+
+    def __init__(self, model: str | None, include_usage: bool = False) -> None:
+        super().__init__(model)
+        self.include_usage = include_usage
+        self._id = _id("chatcmpl-")
+        self._created = int(time.time())
+        self._started = False
+        self._tools: dict[str, int] = {}        # item id -> tool index
+        self._tool_args: dict[str, bool] = {}   # item id -> saw argument deltas
+        self._text_items: set[str] = set()      # items that streamed text deltas
+        self._finish = "stop"
+
+    def _chunk(self, delta: dict, finish: str | None = None) -> bytes:
+        return sse({"id": self._id, "object": "chat.completion.chunk", "created": self._created,
+                    "model": self.model, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+
+    def _start(self) -> list[bytes]:
+        if self._started:
+            return []
+        self._started = True
+        return [self._chunk({"role": "assistant", "content": ""})]
+
+    def _text(self, t: str) -> list[bytes]:
+        self.has_content = True
+        self.deltas += 1
+        return self._start() + [self._chunk({"content": t})]
+
+    def _tool_start(self, item: dict) -> list[bytes]:
+        key = item.get("id") or item.get("call_id") or str(len(self._tools))
+        if key in self._tools:
+            return []
+        k = self._tools[key] = len(self._tools)
+        self.has_content = True
+        return self._start() + [self._chunk({"tool_calls": [{"index": k, "id": item.get("call_id") or _id("call_"),
+                                                             "type": "function",
+                                                             "function": {"name": item.get("name", ""), "arguments": ""}}]})]
+
+    def feed(self, event, data, raw):
+        if data.strip() == "[DONE]":
+            return self.finish()
+        try:
+            j = json.loads(data)
+        except ValueError:
+            return []
+        t = j.get("type") or event or ""
+        if t == "error":
+            e = j.get("error") if isinstance(j.get("error"), dict) else j
+            self.error = e.get("message") or json.dumps(e)
+            return []
+        if t == "response.failed":
+            err = ((j.get("response") or {}).get("error") or {})
+            self.error = err.get("message") or json.dumps(err) or "response failed"
+            return []
+        if t == "response.created":
+            return self._start()
+        if t == "response.output_text.delta":
+            self._text_items.add(j.get("item_id", ""))
+            return self._text(j.get("delta", ""))
+        if t in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+            self.has_content = True
+            self.deltas += 1
+            return self._start() + [self._chunk({"reasoning_content": j.get("delta", "")})]
+        if t == "response.reasoning_summary_part.done":
+            return self._start() + [self._chunk({"reasoning_content": "\n\n"})]
+        if t == "response.output_item.added":
+            item = j.get("item") or {}
+            if item.get("type") == "function_call":
+                return self._tool_start(item)
+            return []
+        if t == "response.function_call_arguments.delta":
+            key = j.get("item_id", "")
+            if key not in self._tools:
+                return []
+            self._tool_args[key] = True
+            return [self._chunk({"tool_calls": [{"index": self._tools[key], "function": {"arguments": j.get("delta", "")}}]})]
+        if t == "response.output_item.done":
+            item = j.get("item") or {}
+            out: list[bytes] = []
+            if item.get("type") == "function_call":
+                out += self._tool_start(item)
+                key = item.get("id") or item.get("call_id")
+                if not self._tool_args.get(key) and item.get("arguments"):
+                    out.append(self._chunk({"tool_calls": [{"index": self._tools[key],
+                                                            "function": {"arguments": item["arguments"]}}]}))
+            elif item.get("type") == "message" and item.get("id") not in self._text_items:
+                txt = "".join(p.get("text", "") for p in item.get("content") or [] if isinstance(p, dict))
+                if txt:
+                    out += self._text(txt)
+            return out
+        if t in ("response.completed", "response.incomplete", "response.done"):
+            r = j.get("response") or {}
+            u = r.get("usage") or {}
+            self.tokens_in = u.get("input_tokens") or self.tokens_in
+            self.tokens_out = u.get("output_tokens") or self.tokens_out
+            if t == "response.incomplete" or (r.get("incomplete_details") or {}).get("reason") == "max_output_tokens":
+                self._finish = "length"
+            return self.finish()
+        return []
+
+    def finish(self):
+        if self.done:
+            return []
+        self.done = True
+        self.stop_reason = "tool_calls" if self._tools and self._finish == "stop" else self._finish
+        out = self._start() + [self._chunk({}, self.stop_reason)]
+        if self.include_usage:
+            out.append(sse({"id": self._id, "object": "chat.completion.chunk", "created": self._created,
+                            "model": self.model, "choices": [],
+                            "usage": {"prompt_tokens": self.tokens_in, "completion_tokens": self.tokens_out,
+                                      "total_tokens": self.tokens_in + self.tokens_out}}))
+        out.append(b"data: [DONE]\n\n")
+        return out
+
+
+class Chain(_StreamBase):
+    """Two translators in a row (e.g. Responses -> OpenAI chat -> Anthropic)."""
+
+    def __init__(self, first: _StreamBase, second: _StreamBase) -> None:
+        super().__init__(first.model)
+        self.first, self.second = first, second
+        self._parser = SSEParser()
+
+    def _sync(self) -> None:
+        f = self.first
+        self.has_content, self.error, self.deltas = f.has_content, f.error, f.deltas
+        self.tokens_in, self.tokens_out = f.tokens_in, f.tokens_out
+        self.done = f.done and self.second.done
+        self.stop_reason = self.second.stop_reason or f.stop_reason
+
+    def _pipe(self, chunks: list[bytes]) -> list[bytes]:
+        out: list[bytes] = []
+        for ev in self._parser.feed(b"".join(chunks)):
+            out += self.second.feed(*ev)
+        return out
+
+    def feed(self, event, data, raw):
+        out = self._pipe(self.first.feed(event, data, raw))
+        self._sync()
+        return out
+
+    def finish(self):
+        out = self._pipe(self.first.finish())
+        if not self.second.done:
+            if self.first.tokens_out:
+                self.second.tokens_out = self.first.tokens_out
+            out += self.second.finish()
+        self._sync()
+        return out
+
+
+def collect_openai_chunks(chunks: list[bytes], model: str | None) -> dict:
+    """Fold OpenAI chat-completion stream chunks into one chat.completion response."""
+    text, thought, calls, finish, usage = [], [], {}, "stop", {}
+    for _, data, _ in SSEParser().feed(b"".join(chunks)):
+        if data.strip() == "[DONE]":
+            continue
+        j = json.loads(data)
+        if j.get("usage"):
+            usage = j["usage"]
+        for ch in j.get("choices") or []:
+            d = ch.get("delta") or {}
+            if d.get("content"):
+                text.append(d["content"])
+            if d.get("reasoning_content"):
+                thought.append(d["reasoning_content"])
+            for tc in d.get("tool_calls") or []:
+                c = calls.setdefault(tc.get("index", 0), {"id": None, "type": "function",
+                                                          "function": {"name": "", "arguments": ""}})
+                c["id"] = tc.get("id") or c["id"]
+                fn = tc.get("function") or {}
+                c["function"]["name"] += fn.get("name") or ""
+                c["function"]["arguments"] += fn.get("arguments") or ""
+            if ch.get("finish_reason"):
+                finish = ch["finish_reason"]
+    msg: dict[str, Any] = {"role": "assistant", "content": "".join(text) or (None if calls else "")}
+    if thought:
+        msg["reasoning_content"] = "".join(thought)
+    if calls:
+        msg["tool_calls"] = [calls[k] for k in sorted(calls)]
+    return {"id": _id("chatcmpl-"), "object": "chat.completion", "created": int(time.time()), "model": model,
+            "choices": [{"index": 0, "message": msg, "finish_reason": finish}],
+            "usage": {"prompt_tokens": usage.get("prompt_tokens", 0), "completion_tokens": usage.get("completion_tokens", 0),
+                      "total_tokens": usage.get("total_tokens", 0)}}

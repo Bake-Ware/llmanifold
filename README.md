@@ -29,6 +29,12 @@ Anthropic API shapes on the way.
 - **Dialects.** `/v1/chat/completions` and `/v1/messages` both work against
   either kind of upstream, streaming included: messages, system prompts, tools
   and tool results, images, stop sequences, usage.
+- **ChatGPT plans via Codex.** An endpoint with `dialect: responses` speaks
+  OpenAI's Responses API; add `login: chatgpt` and point it at
+  `https://chatgpt.com/backend-api/codex` to serve requests from a ChatGPT
+  plan, the way the Codex CLI does. Sign in from the admin site with a device
+  code (or paste a Codex `auth.json`); tokens refresh by themselves and are
+  stored in `<data_dir>/chatgpt/` (mode 600).
 - **Priorities.** Requests marked background (by token, or the
   `X-LLManifold-Priority: background` header) queue behind interactive ones and
   can be limited to N lanes per model.

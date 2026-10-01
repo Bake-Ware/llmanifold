@@ -31,7 +31,7 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,99}$")
 KEEP_BACKUPS = 20
 
 # fields the admin site may set, in the order they're written for a new entry
-ENDPOINT_FIELDS = ("url", "dialect", "model", "max_concurrency", "context", "probe", "metered", "fallback",
+ENDPOINT_FIELDS = ("url", "dialect", "login", "model", "max_concurrency", "context", "probe", "metered", "fallback",
                    "overflow_at", "timeout", "connect_timeout")
 FLOW_FIELDS = ("aliases", "pool", "fallback", "fallback_on", "auth", "allow_metered_unauthenticated",
                "queue_timeout", "first_token_timeout", "background_max_lanes", "affinity", "context",

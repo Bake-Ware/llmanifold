@@ -14,7 +14,8 @@ from typing import Any
 
 import yaml
 
-DIALECTS = ("openai", "anthropic")
+DIALECTS = ("openai", "anthropic", "responses")   # responses: OpenAI Responses API (upstream only)
+LOGINS = ("chatgpt",)
 PROBES = ("none", "models", "strata", "llamacpp")
 TRIGGERS = ("connect", "timeout", "slow", "5xx", "429", "4xx", "context", "empty", "queue")
 DEFAULT_TRIGGERS = ("connect", "timeout", "5xx", "429", "context", "empty", "queue")
@@ -39,6 +40,7 @@ class Endpoint:
     metered: bool = False          # costs money per request (remote API)
     fallback: bool = False         # only used as a fallback, never as a first choice
     overflow_at: int | None = None # as a flow's fallback: take requests once this many are waiting for a lane
+    login: str | None = None       # "chatgpt": authenticate with a ChatGPT (Codex) sign-in instead of a key
     timeout: float = 1800.0        # whole-request read timeout (s)
     connect_timeout: float = 5.0
     stream_usage: bool = True      # ask OpenAI-style engines for token counts on streams
@@ -176,6 +178,10 @@ def parse(raw: dict[str, Any], path: str | None = None) -> Config:
             ep.url = ep.url[:-3]
         if ep.dialect not in DIALECTS:
             raise ConfigError(f"endpoint {name!r}: dialect must be one of {DIALECTS}")
+        if ep.login is not None and ep.login not in LOGINS:
+            raise ConfigError(f"endpoint {name!r}: login must be one of {LOGINS}")
+        if ep.login == "chatgpt" and ep.dialect != "responses":
+            raise ConfigError(f"endpoint {name!r}: a ChatGPT sign-in needs dialect: responses")
         if ep.probe not in PROBES:
             raise ConfigError(f"endpoint {name!r}: probe must be one of {PROBES}")
         if ep.max_concurrency < 1:

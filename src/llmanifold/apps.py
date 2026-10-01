@@ -302,6 +302,10 @@ def _endpoint_spec(core: Core, name: str) -> dict:
     out = {f: getattr(e, f) for f in ENDPOINT_FIELDS}
     out["key"] = ("file" if e.key_file else "env" if e.key_env else "literal" if e.key else None)
     out["key_set"] = bool(e.api_key())
+    out["login"] = e.login
+    if e.login == "chatgpt":
+        s = core.chatgpt.status(name)
+        out["chatgpt"] = {k: s.get(k) for k in ("signed_in", "email", "plan", "last_error")}
     out["flows"] = [m.name for m in core.cfg.models.values() if name in m.pool or name in m.fallback]
     return out
 
@@ -383,9 +387,78 @@ async def a_endpoint_test(request: web.Request) -> web.Response:
     if not url:
         return web.json_response({"error": "a URL is required"}, status=400)
     key = str(b.get("key") or "").strip() or None
-    if key is None and b.get("name") in core.cfg.endpoints:
+    login_of = None
+    if b.get("login") == "chatgpt":
+        login_of = b.get("name") if b.get("name") in core.cfg.endpoints else None
+        if login_of is None:
+            return web.json_response({"ok": False, "error": "save the model first, then sign in to ChatGPT; "
+                                                            "the test runs with that sign-in"})
+    elif key is None and b.get("name") in core.cfg.endpoints:
         key = core.cfg.endpoints[b["name"]].api_key()
-    return web.json_response(await core.test_endpoint(url, b.get("dialect") or "openai", key))
+    return web.json_response(await core.test_endpoint(url, b.get("dialect") or "openai", key, login_of))
+
+
+# ---- ChatGPT (Codex) sign-in, people only
+
+def _chatgpt_endpoint(request: web.Request):
+    core = request.app[CORE]
+    name = request.match_info["name"]
+    ep = core.cfg.endpoints.get(name)
+    if ep is None or ep.login != "chatgpt":
+        return None, web.json_response({"error": f"{name!r} isn't a model that signs in with ChatGPT"}, status=404)
+    return name, None
+
+
+async def a_chatgpt_status(request: web.Request) -> web.Response:
+    name, err = _chatgpt_endpoint(request)
+    return err or web.json_response(request.app[CORE].chatgpt.status(name))
+
+
+async def a_chatgpt_start(request: web.Request) -> web.Response:
+    if (deny := _human(request)) is not None:
+        return deny
+    name, err = _chatgpt_endpoint(request)
+    if err:
+        return err
+    from .chatgpt import LoginError
+    try:
+        p = await request.app[CORE].chatgpt.start(name)
+    except LoginError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        return web.json_response({"error": f"couldn't reach OpenAI: {type(e).__name__}"}, status=502)
+    log.info("chatgpt sign-in started for %s by %s", name, request["who"].get("email"))
+    return web.json_response(p)
+
+
+async def a_chatgpt_import(request: web.Request) -> web.Response:
+    if (deny := _human(request)) is not None:
+        return deny
+    name, err = _chatgpt_endpoint(request)
+    if err:
+        return err
+    from .chatgpt import LoginError
+    b = await _body(request)
+    core = request.app[CORE]
+    try:
+        core.chatgpt.import_auth_json(name, str(b.get("auth_json") or ""))
+        await core.chatgpt.headers(name)          # proves the refresh token works
+    except LoginError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    st = core.router.states.get(name)
+    if st:
+        st.mark_ok()
+    return web.json_response(core.chatgpt.status(name))
+
+
+async def a_chatgpt_logout(request: web.Request) -> web.Response:
+    if (deny := _human(request)) is not None:
+        return deny
+    name, err = _chatgpt_endpoint(request)
+    if err:
+        return err
+    request.app[CORE].chatgpt.logout(name)
+    return web.json_response({"ok": True})
 
 
 async def a_flow_create(request: web.Request) -> web.Response:
@@ -524,6 +597,10 @@ def build_admin_app(core: Core) -> web.Application:
     r.add_get("/api/history", a_history)
     r.add_post("/api/endpoints", a_endpoint_create)
     r.add_post("/api/test-endpoint", a_endpoint_test)
+    r.add_get("/api/endpoints/{name}/chatgpt", a_chatgpt_status)
+    r.add_post("/api/endpoints/{name}/chatgpt/start", a_chatgpt_start)
+    r.add_post("/api/endpoints/{name}/chatgpt/import", a_chatgpt_import)
+    r.add_delete("/api/endpoints/{name}/chatgpt", a_chatgpt_logout)
     r.add_put("/api/endpoints/{name}", a_endpoint_update)
     r.add_delete("/api/endpoints/{name}", a_endpoint_delete)
     r.add_post("/api/flows", a_flow_create)

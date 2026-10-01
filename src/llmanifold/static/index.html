@@ -169,6 +169,7 @@
         <option value="local">An engine on your network (llama.cpp, Strata, vLLM…)</option>
         <option value="deepseek">DeepSeek API</option>
         <option value="anthropic">Anthropic API</option>
+        <option value="codex">ChatGPT plan, via Codex (sign in with ChatGPT)</option>
         <option value="openai">OpenAI API</option>
         <option value="openrouter">OpenRouter</option>
         <option value="other">Another OpenAI-compatible API</option>
@@ -179,13 +180,19 @@
         <input name="name" required placeholder="strata-a" pattern="[A-Za-z0-9][A-Za-z0-9._:@+\-]*">
       </label>
       <label class="field">API type
-        <select name="dialect"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option></select>
+        <select name="dialect"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option>
+          <option value="responses">OpenAI Responses (Codex)</option></select>
       </label>
     </div>
     <label class="field">Base URL
       <input name="url" required placeholder="http://127.0.0.1:8080" inputmode="url">
     </label>
-    <label class="field">API key <span class="opt" id="key-hint">only for paid APIs; stored in a file only llmanifold can read</span>
+    <label class="field" id="login-field" hidden>Sign in with
+      <select name="login"><option value="">An API key</option><option value="chatgpt">A ChatGPT account (Codex)</option></select>
+    </label>
+    <p class="muted small" id="login-hint" hidden>After saving, use <b>Sign in</b> on this model to connect your ChatGPT account.
+      Requests then count against your ChatGPT plan's Codex limits.</p>
+    <label class="field" id="key-field">API key <span class="opt" id="key-hint">only for paid APIs; stored in a file only llmanifold can read</span>
       <input name="key" type="password" autocomplete="new-password" placeholder="sk-…">
     </label>
     <label class="check clear-key" hidden><input type="checkbox" name="clear_key"> Remove the saved key</label>
@@ -227,6 +234,24 @@
       <button type="submit" id="model-save">Add model</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="signin-dialog" class="confirm form-dialog">
+  <div class="signin">
+    <h2>Sign in with ChatGPT</h2>
+    <p class="muted small sub">for <b id="signin-model"></b></p>
+    <div id="signin-body"></div>
+    <details class="import">
+      <summary>Or paste the auth.json from a Codex login</summary>
+      <p class="muted small">On a computer where you've run <code>codex login</code>, copy <code>~/.codex/auth.json</code> and paste it here.</p>
+      <textarea id="signin-json" rows="5" spellcheck="false" placeholder='{"tokens": {"access_token": …, "refresh_token": …}}'></textarea>
+      <button type="button" class="secondary" id="signin-import">Use this sign-in</button>
+    </details>
+    <p class="form-error" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" data-close>Close</button>
+    </div>
+  </div>
 </dialog>
 
 <dialog id="settings-dialog" class="confirm form-dialog">

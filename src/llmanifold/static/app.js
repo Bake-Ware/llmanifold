@@ -439,9 +439,16 @@
         <td>${epKind(sp)}</td>
         <td><span class="state ${st}"><span class="st"></span>${st}</span></td>
         <td class="chain wrap">${sp.flows.length ? esc(sp.flows.join(', ')) : 'no flows'}</td>
-        <td class="mono">${sp.key_set ? 'set' : sp.metered ? '<span class="bad">missing</span>' : '–'}</td>
+        <td class="mono">${sp.login === 'chatgpt'
+          ? (sp.chatgpt && sp.chatgpt.signed_in
+            ? `ChatGPT${sp.chatgpt.email ? ': ' + esc(sp.chatgpt.email) : ''}${sp.chatgpt.plan ? ' (' + esc(sp.chatgpt.plan) + ')' : ''}${sp.chatgpt.last_error ? '<div class="bad">' + esc(sp.chatgpt.last_error) + '</div>' : ''}`
+            : '<span class="bad">not signed in</span>')
+          : sp.key_set ? 'set' : sp.metered ? '<span class="bad">missing</span>' : '–'}</td>
         <td class="actions">
           ${e.draining ? `<button class="small" data-resume="${esc(n)}">Resume</button>` : `<button class="small secondary" data-pause="${esc(n)}">Pause</button>`}
+          ${sp.login === 'chatgpt' ? (sp.chatgpt && sp.chatgpt.signed_in
+            ? `<button class="small ghost edit-only" data-signout="${esc(n)}">Sign out</button>`
+            : `<button class="small edit-only" data-signin="${esc(n)}">Sign in</button>`) : ''}
           <button class="small secondary edit-only" data-edit-model="${esc(n)}">Edit</button>
           <button class="small ghost edit-only" data-delete-model="${esc(n)}">Remove</button></td></tr>`;
     }).join('') || '<tr><td colspan="7" class="empty">No models yet. Add one to start routing.</td></tr>';
@@ -473,17 +480,29 @@
     deepseek: { name: 'deepseek', url: 'https://api.deepseek.com', dialect: 'openai', model: 'deepseek-chat', max_concurrency: 8, context: 131072, probe: 'models', metered: true, fallback: true, overflow_at: 5 },
     anthropic: { name: 'anthropic', url: 'https://api.anthropic.com', dialect: 'anthropic', model: '', max_concurrency: 4, context: 200000, probe: 'none', metered: true, fallback: false },
     openai: { name: 'openai', url: 'https://api.openai.com', dialect: 'openai', model: '', max_concurrency: 8, probe: 'models', metered: true, fallback: false },
+    codex: { name: 'codex', url: 'https://chatgpt.com/backend-api/codex', dialect: 'responses', login: 'chatgpt', model: 'gpt-5.5', max_concurrency: 4, context: '', probe: 'none', metered: true, fallback: true, overflow_at: 5 },
     openrouter: { name: 'openrouter', url: 'https://openrouter.ai/api', dialect: 'openai', model: '', max_concurrency: 8, probe: 'models', metered: true, fallback: false },
     other: { name: '', url: 'https://', dialect: 'openai', model: '', max_concurrency: 4, probe: 'models', metered: true, fallback: false },
   };
   let editing = null;
   function fillModelForm(v) {
     const f = $('#model-form');
-    for (const k of ['name', 'url', 'dialect', 'model', 'max_concurrency', 'context', 'probe', 'overflow_at']) {
+    for (const k of ['name', 'url', 'dialect', 'login', 'model', 'max_concurrency', 'context', 'probe', 'overflow_at']) {
       if (k in v) f.elements[k].value = v[k] ?? '';
     }
     for (const k of ['metered', 'fallback']) if (k in v) f.elements[k].checked = !!v[k];
+    syncLogin();
   }
+  function syncLogin() {
+    const f = $('#model-form'), resp = f.elements.dialect.value === 'responses';
+    if (!resp) f.elements.login.value = '';
+    const chatgpt = f.elements.login.value === 'chatgpt';
+    $('#login-field').hidden = !resp;
+    $('#login-hint').hidden = !chatgpt;
+    $('#key-field').hidden = chatgpt;
+  }
+  $('#model-form').elements.dialect.addEventListener('change', syncLogin);
+  $('#model-form').elements.login.addEventListener('change', syncLogin);
   async function openModelDialog(name) {
     const f = $('#model-form');
     f.reset();
@@ -499,17 +518,17 @@
     if (name) {
       cfg = await api('/api/config');
       const sp = cfg.endpoints[name];
-      fillModelForm({ name, ...sp, context: sp.context || '', overflow_at: sp.overflow_at || '' });
+      fillModelForm({ name, ...sp, context: sp.context || '', overflow_at: sp.overflow_at || '', login: sp.login || '' });
       f.elements.key.placeholder = sp.key_set ? 'saved; leave blank to keep it' : 'sk-…';
       $('.clear-key', f).hidden = sp.key !== 'file';
     } else {
-      fillModelForm({ overflow_at: '', ...PRESETS.local });
+      fillModelForm({ overflow_at: '', login: '', ...PRESETS.local });
       f.elements.key.placeholder = 'sk-…';
     }
     $('#model-dialog').showModal();
   }
   $('#model-form').elements.preset.addEventListener('change', (ev) => {
-    if (!editing) fillModelForm({ context: '', overflow_at: '', ...PRESETS[ev.target.value] });
+    if (!editing) fillModelForm({ context: '', overflow_at: '', login: '', ...PRESETS[ev.target.value] });
   });
   $('#test-model').addEventListener('click', async () => {
     const f = $('#model-form'), out = $('#test-result');
@@ -517,7 +536,7 @@
     out.textContent = 'Testing…';
     try {
       const r = await post('/api/test-endpoint', { url: f.elements.url.value, dialect: f.elements.dialect.value,
-        key: f.elements.key.value, name: editing });
+        key: f.elements.key.value, name: editing, login: f.elements.login.value || null });
       if (r.ok) {
         out.className = 'small ok';
         out.textContent = `Connected in ${r.ms} ms. ${r.models.length ? `It offers ${r.models.length} model${r.models.length === 1 ? '' : 's'}; pick one below.` : 'It didn’t list any models.'}`;
@@ -537,14 +556,20 @@
       max_concurrency: Number(el.max_concurrency.value) || 1, context: el.context.value ? Number(el.context.value) : null,
       probe: el.probe.value, metered: el.metered.checked, fallback: el.fallback.checked,
       overflow_at: el.overflow_at.value ? Number(el.overflow_at.value) : null,
+      login: el.login.value || null,
     };
     if (el.key.value.trim()) body.key = el.key.value.trim();
     if (editing && el.clear_key.checked) body.clear_key = true;
     try {
+      const name = editing || el.name.value.trim();
       if (editing) await post(`/api/endpoints/${enc(editing)}`, body, 'PUT');
-      else await post('/api/endpoints', { name: el.name.value.trim(), ...body });
+      else await post('/api/endpoints', { name, ...body });
       $('#model-dialog').close();
       await tick();
+      if (body.login === 'chatgpt') {
+        const st = await api(`/api/endpoints/${enc(name)}/chatgpt`).catch(() => null);
+        if (st && !st.signed_in) await openSignin(name);
+      }
     } catch (e) { formError(f, e.message); }
   });
 
@@ -615,6 +640,56 @@
   });
   $('#new-flow').addEventListener('click', openFlowDialog);
 
+  // ------------------------------------------------------------- ChatGPT sign-in
+  let signinTimer = 0;
+  async function openSignin(name) {
+    const dlg = $('#signin-dialog'), box = $('.signin', dlg);
+    $('#signin-model').textContent = name;
+    $('#signin-json').value = '';
+    formError(box, '');
+    dlg.dataset.name = name;
+    $('#signin-body').innerHTML = '<p class="muted">Asking OpenAI for a sign-in code…</p>';
+    dlg.showModal();
+    try {
+      const p = await post(`/api/endpoints/${enc(name)}/chatgpt/start`);
+      $('#signin-body').innerHTML = `<ol class="steps">
+        <li>Open <a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url.replace(/^https:\/\//, ''))}</a> and sign in to the ChatGPT account whose plan should serve requests.</li>
+        <li>Enter this code: <code class="user-code">${esc(p.user_code)}</code></li></ol>
+        <p class="muted small" id="signin-state">Waiting for you to approve it (the code lasts 15 minutes)…</p>`;
+    } catch (e) {
+      $('#signin-body').innerHTML = '';
+      formError(box, e.message + ' You can paste a Codex auth.json below instead.');
+      $('details.import', dlg).open = true;
+    }
+    clearInterval(signinTimer);
+    signinTimer = setInterval(async () => {
+      if (!dlg.open) { clearInterval(signinTimer); return; }
+      const st = await api(`/api/endpoints/${enc(name)}/chatgpt`).catch(() => null);
+      if (!st) return;
+      if (st.signed_in && (!st.pending || st.pending.state === 'done')) {
+        clearInterval(signinTimer);
+        $('#signin-body').innerHTML = `<p class="ok">Signed in${st.email ? ' as <b>' + esc(st.email) + '</b>' : ''}${st.plan ? ' (' + esc(st.plan) + ' plan)' : ''}. ${esc(name)} can serve requests now.</p>`;
+        $('details.import', dlg).open = false;
+        tick();
+      } else if (st.pending && (st.pending.state === 'error' || st.pending.state === 'expired')) {
+        clearInterval(signinTimer);
+        formError(box, st.pending.error || 'Sign-in didn’t finish. Close this and try again.');
+      }
+    }, 2000);
+  }
+  $('#signin-import').addEventListener('click', async () => {
+    const dlg = $('#signin-dialog'), box = $('.signin', dlg), name = dlg.dataset.name;
+    try {
+      const st = await post(`/api/endpoints/${enc(name)}/chatgpt/import`, { auth_json: $('#signin-json').value });
+      clearInterval(signinTimer);
+      formError(box, '');
+      $('#signin-json').value = '';
+      $('#signin-body').innerHTML = `<p class="ok">Signed in${st.email ? ' as <b>' + esc(st.email) + '</b>' : ''}. ${esc(name)} can serve requests now.</p>`;
+      $('details.import', dlg).open = false;
+      tick();
+    } catch (e) { formError(box, e.message); }
+  });
+
   async function openSettingsDialog(flow) {
     const f = $('#settings-form');
     f.reset();
@@ -654,6 +729,12 @@
         await post(`/api/endpoints/${enc(d.pause)}/pause`);
       } else if (d.resume) {
         await post(`/api/endpoints/${enc(d.resume)}/resume`);
+      } else if (d.signin) {
+        await openSignin(d.signin);
+        return;
+      } else if (d.signout) {
+        if (!(await confirmAction(`Sign ${d.signout} out of ChatGPT?`, 'llmanifold forgets the ChatGPT sign-in for this model. Flows using it skip it until someone signs in again.', 'Sign out', true))) return;
+        await api(`/api/endpoints/${enc(d.signout)}/chatgpt`, { method: 'DELETE' });
       } else if (d.flowSettings) {
         await openSettingsDialog(d.flowSettings);
         return;

@@ -23,6 +23,7 @@ from typing import Any, Callable
 import yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
+from ruamel.yaml.tokens import CommentToken
 
 from .config import DIALECTS, PROBES, Config, ConfigError, parse
 
@@ -75,6 +76,39 @@ def _clean(value: Any, field: str, lists: set[str]) -> Any:
     return value
 
 
+def _deepest_last(m: CommentedMap) -> tuple[CommentedMap, Any]:
+    """The map and key that end `m` in the file (descending into a trailing nested map)."""
+    node = m
+    while True:
+        last = list(node.keys())[-1]
+        v = node[last]
+        if isinstance(v, CommentedMap) and len(v):
+            node = v
+            continue
+        return node, last
+
+
+def _put(m: CommentedMap, key: str, value: Any) -> None:
+    """Set a key. A key appended to a map takes over the blank lines that followed the old
+    end of that map, so the gaps between sections stay where they were; end-of-line comments
+    stay on their own keys."""
+    if key in m or not len(m):
+        m[key] = value
+        return
+    owner, last = _deepest_last(m)
+    tok = owner.ca.items.get(last)
+    m[key] = value
+    if not (tok and len(tok) > 2 and tok[2] is not None):
+        return
+    first, nl, rest = tok[2].value.partition("\n")
+    if not rest:
+        return
+    tok[2].value = first + nl
+    new_owner, new_last = (_deepest_last(value) if isinstance(value, CommentedMap) and len(value)
+                           else (m, key))
+    new_owner.ca.items[new_last] = [None, None, CommentToken("\n" + rest, tok[2].start_mark, None), None]
+
+
 def _apply_fields(target: CommentedMap, fields: dict, allowed: tuple[str, ...], lists: set[str] = frozenset()) -> None:
     unknown = set(fields) - set(allowed)
     if unknown:
@@ -86,9 +120,9 @@ def _apply_fields(target: CommentedMap, fields: dict, allowed: tuple[str, ...], 
         if v is None or v == "" or (f in lists and not v and f not in ("pool", "fallback")):
             target.pop(f, None)
         elif f in lists:
-            target[f] = _flow_seq(v)
+            _put(target, f, _flow_seq(v))
         else:
-            target[f] = v
+            _put(target, f, v)
 
 
 def _flows_using(doc: CommentedMap, endpoint: str) -> list[str]:
@@ -185,8 +219,9 @@ class ConfigEditor:
                 for k in ("key", "key_env", "key_file"):
                     ep.pop(k, None)
                 if key_file:
-                    ep["key_file"] = str(key_file)
-            eps[name] = ep
+                    _put(ep, "key_file", str(key_file))
+            if create:
+                _put(eps, name, ep)
 
         cfg = await self.edit(fn)
         if clear_key:
@@ -231,7 +266,8 @@ class ConfigEditor:
             _apply_fields(m, fields, FLOW_FIELDS, LIST_FIELDS)
             if create and "pool" not in m:
                 m["pool"] = _flow_seq([])
-            flows[name] = m
+            if create:
+                _put(flows, name, m)
 
         return await self.edit(fn)
 
@@ -261,7 +297,7 @@ class ConfigEditor:
             for r in ("pool", "fallback"):
                 if endpoint in list(m.get(r) or []):
                     raise EditError(f"{endpoint} is already in {flow}")
-            m[role] = _flow_seq(list(m.get(role) or []) + [endpoint])
+            _put(m, role, _flow_seq(list(m.get(role) or []) + [endpoint]))
 
         return await self.edit(fn)
 

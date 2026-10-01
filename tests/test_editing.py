@@ -164,3 +164,15 @@ async def test_page_and_assets_are_cache_safe(stack):
     r = await s.admin.get(f"/static/app.js?v={js.group(1)}")
     assert r.status == 200 and "immutable" in r.headers["Cache-Control"]
     assert (await s.admin.get("/api/status")).headers["Cache-Control"] == "no-store"
+
+
+async def test_edits_keep_section_gaps_and_comments(stack):
+    s = await stack(POOL2, {"qwen": {"pool": ["a"]}}, **HUMAN)
+    path = Path(s.core.cfg.path)
+    text = path.read_text().replace("models:", "\nmodels:", 1).replace("pool:", "pool: # lanes\n   ", 0)
+    path.write_text(text)
+    await s.admin.put("/api/endpoints/b", json={"overflow_at": 3})
+    await s.admin.post("/api/endpoints", json={"name": "c", "url": "http://127.0.0.1:9"})
+    out = path.read_text()
+    assert "\n\nmodels:" in out                        # the blank line before the next section survives
+    assert "overflow_at: 3\n" in out

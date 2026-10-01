@@ -51,6 +51,23 @@ async def test_model_alias_and_upstream_model_name(stack):
     assert ids["legacy-name"]["alias_of"] == "qwen" and "meta" not in ids["qwen"]   # no context known: none advertised
 
 
+async def test_unknown_model_uses_default_when_configured(stack):
+    s = await stack(POOL2, {"qwen": {"pool": ["a", "b"], "input_modalities": ["text", "image"]}})
+    assert (await s.api.post("/v1/chat/completions", json=chat(model="mystery"))).status == 404
+    s = await stack(POOL2, {"qwen": {"pool": ["a", "b"]}}, default_model="qwen")
+    for name in ("mystery", ""):
+        r = await s.api.post("/v1/chat/completions", json=chat(model=name))
+        assert r.status == 200
+    models = await (await s.api.get("/v1/models")).json()
+    assert "architecture" not in models["data"][0]
+
+
+async def test_input_modalities_advertised(stack):
+    s = await stack(POOL2, {"qwen": {"pool": ["a", "b"], "input_modalities": ["text", "image"]}})
+    m = (await (await s.api.get("/v1/models")).json())["data"][0]
+    assert m["architecture"]["input_modalities"] == ["text", "image"]
+
+
 # ---------------------------------------------------------------- priorities
 
 async def test_background_limited_to_one_lane_and_interactive_jumps_queue(stack):

@@ -41,3 +41,14 @@ def test_duplicate_alias_rejected():
     raw["models"]["n"] = {"pool": ["a"], "aliases": ["x"]}
     with pytest.raises(ConfigError, match="alias"):
         parse(raw)
+
+
+def test_default_model():
+    raw = _base()
+    raw["default_model"] = "m"
+    cfg = parse(raw)
+    assert cfg.resolve("whatever", use_default=True).name == "m"
+    assert cfg.resolve("whatever") is None
+    raw["default_model"] = "ghost"
+    with pytest.raises(ConfigError, match="default_model"):
+        parse(raw)

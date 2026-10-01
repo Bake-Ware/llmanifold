@@ -9,6 +9,7 @@ listen:
 data_dir: ./data             # SQLite: tokens, per-model auth overrides, request history
 history_days: 30
 keepalive_after: 15          # seconds of silence before sending keepalives (proxies time out idle streams)
+default_model: local-large   # for requests that name no model or an unknown one (omit to answer 404)
 
 # ---------------------------------------------------------------- endpoints
 # An endpoint is one place a request can be sent. `url` is the base URL
@@ -61,6 +62,7 @@ models:
     first_token_timeout: 300
     background_max_lanes: 1              # requests marked background may hold at most one lane
     auth: open                           # open | token (people can change this in the admin site)
+    input_modalities: [text, image]      # advertised in /v1/models
     allow_metered_unauthenticated: false # open callers don't get the metered fallback
 
   sonnet:

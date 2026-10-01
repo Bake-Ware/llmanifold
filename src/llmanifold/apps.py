@@ -87,7 +87,7 @@ async def status(request: web.Request) -> web.Response:
 async def props(request: web.Request) -> web.Response:
     """llama.cpp-style /props, which some clients read for the context size."""
     core = request.app[CORE]
-    m = core.cfg.resolve(request.query.get("model")) or next(iter(core.cfg.models.values()), None)
+    m = core.cfg.resolve(request.query.get("model"), use_default=True) or next(iter(core.cfg.models.values()), None)
     ctx = (m.context if m else None) or 0
     return web.json_response({"model_alias": m.name if m else None,
                               "default_generation_settings": {"n_ctx": ctx}, "n_ctx": ctx})
@@ -102,7 +102,7 @@ async def passthrough(request: web.Request) -> web.StreamResponse:
         body = json.loads(raw or b"{}")
     except ValueError:
         return web.json_response(D.error_body("openai", "invalid JSON body"), status=400)
-    model = core.cfg.resolve(body.get("model"))
+    model = core.cfg.resolve(body.get("model"), use_default=True)
     if model is None:
         return web.json_response(D.error_body("openai", f"unknown model {body.get('model')!r}"), status=404)
     tok = core.store.lookup_token(core.client_token(request))

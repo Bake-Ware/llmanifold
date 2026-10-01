@@ -70,6 +70,7 @@ class Model:
     background_max_lanes: int | None = None          # background requests may hold at most N pool lanes
     affinity: bool = True                            # reuse the endpoint that last served a conversation
     context: int | None = None                       # advertised context (default: smallest in pool)
+    input_modalities: list[str] | None = None        # advertised in /v1/models, e.g. [text, image]
     description: str = ""
 
 
@@ -119,17 +120,19 @@ class Config:
     webhooks: list[Webhook] = field(default_factory=list)
     admin: Admin = field(default_factory=Admin)
     priority_header: str = "X-LLManifold-Priority"
+    default_model: str | None = None     # used when a request names no model, or one we don't know
     path: str | None = None
 
     # alias or model name -> Model
-    def resolve(self, name: str | None) -> Model | None:
-        if not name:
-            return None
-        if name in self.models:
-            return self.models[name]
-        for m in self.models.values():
-            if name in m.aliases:
-                return m
+    def resolve(self, name: str | None, use_default: bool = False) -> Model | None:
+        if name:
+            if name in self.models:
+                return self.models[name]
+            for m in self.models.values():
+                if name in m.aliases:
+                    return m
+        if use_default and self.default_model:
+            return self.resolve(self.default_model)
         return None
 
 
@@ -159,6 +162,7 @@ def parse(raw: dict[str, Any], path: str | None = None) -> Config:
     cfg.keepalive_after = float(raw.get("keepalive_after", cfg.keepalive_after))
     cfg.health_interval = float(raw.get("health_interval", cfg.health_interval))
     cfg.priority_header = str(raw.get("priority_header", cfg.priority_header))
+    cfg.default_model = raw.get("default_model") or None
 
     ep_keys = set(Endpoint.__dataclass_fields__) - {"name"}
     for name, d in (raw.get("endpoints") or {}).items():
@@ -207,6 +211,9 @@ def parse(raw: dict[str, Any], path: str | None = None) -> Config:
             ctxs = [cfg.endpoints[e].context for e in m.pool if cfg.endpoints[e].context]
             m.context = min(ctxs) if ctxs else None
         cfg.models[name] = m
+
+    if cfg.default_model and cfg.resolve(cfg.default_model) is None:
+        raise ConfigError(f"default_model {cfg.default_model!r} is not a model or alias")
 
     for w in raw.get("webhooks") or []:
         if "url" not in w:

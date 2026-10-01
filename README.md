@@ -85,6 +85,10 @@ models:
 
 API keys come from `key_env` or `key_file`; avoid literal `key:` values.
 
+Set `default_model` to route requests that name no model, or one llmanifold
+doesn't know, instead of answering 404 (handy when replacing a single-model
+server whose clients send whatever name they were configured with).
+
 ### Probes
 
 `probe` decides how health and busy state are checked between requests:

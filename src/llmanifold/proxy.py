@@ -329,6 +329,9 @@ class Core:
                 if m.context:
                     entry.update({"context_length": m.context, "max_model_len": m.context,
                                   "meta": {"n_ctx": m.context}})
+                if m.input_modalities:
+                    entry["architecture"] = {"input_modalities": list(m.input_modalities),
+                                             "output_modalities": ["text"]}
                 data.append(entry)
         return {"object": "list", "data": data, "has_more": False}
 
@@ -342,7 +345,7 @@ class Core:
             return web.json_response(D.error_body(dialect, f"invalid JSON body: {e}", "invalid_request_error"),
                                      status=400)
         requested = body.get("model") or ""
-        model = self.cfg.resolve(requested)
+        model = self.cfg.resolve(requested, use_default=True)
         if model is None:
             return web.json_response(D.error_body(dialect, f"unknown model {requested!r}; GET /v1/models lists them",
                                                   "not_found_error"), status=404)

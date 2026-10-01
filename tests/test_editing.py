@@ -151,3 +151,16 @@ async def test_history_buckets(stack):
     assert h["totals"]["requests"] == 4 and h["totals"]["errors"] == 1
     assert sum(sum(b["requests"].values()) for b in h["buckets"]) == 3
     assert h["endpoints"][:2] == ["a", "b"] and len(h["problems"]) == 1
+
+
+async def test_page_and_assets_are_cache_safe(stack):
+    s = await stack(POOL2, {"qwen": {"pool": ["a"]}})
+    r = await s.admin.get("/")
+    html = await r.text()
+    assert r.headers["Cache-Control"] == "no-store"
+    import re
+    js = re.search(r'/static/app\.js\?v=([0-9a-f]{12})', html)
+    assert js and re.search(r'/static/style\.css\?v=' + js.group(1), html)
+    r = await s.admin.get(f"/static/app.js?v={js.group(1)}")
+    assert r.status == 200 and "immutable" in r.headers["Cache-Control"]
+    assert (await s.admin.get("/api/status")).headers["Cache-Control"] == "no-store"

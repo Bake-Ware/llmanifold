@@ -183,7 +183,38 @@ async def access(request: web.Request, handler):
     if who is None:
         return web.json_response({"error": "forbidden"}, status=403)
     request["who"] = who
-    return await handler(request)
+    resp = await handler(request)
+    # Proxies (Cloudflare caches .js/.css by default) and browsers must never pair a new page
+    # with an old script: the page and API are never cached, static files are fingerprinted.
+    if request.path.startswith("/static/") and request.query.get("v"):
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    else:
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def _fingerprint() -> str:
+    import hashlib
+    h = hashlib.sha256()
+    for f in sorted(STATIC.iterdir()):
+        if f.is_file():
+            h.update(f.name.encode() + f.read_bytes())
+    return h.hexdigest()[:12]
+
+
+_INDEX: tuple[str, str] | None = None
+
+
+def _index_html() -> str:
+    """index.html with every /static/ URL carrying the assets' content hash."""
+    global _INDEX
+    fp = _fingerprint()
+    if _INDEX is None or _INDEX[0] != fp:
+        html = (STATIC / "index.html").read_text()
+        for name in ("style.css", "app.js"):
+            html = html.replace(f"/static/{name}", f"/static/{name}?v={fp}")
+        _INDEX = (fp, html)
+    return _INDEX[1]
 
 
 def _human(request: web.Request) -> web.Response | None:
@@ -193,8 +224,8 @@ def _human(request: web.Request) -> web.Response | None:
     return None
 
 
-async def a_index(request: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC / "index.html")
+async def a_index(request: web.Request) -> web.Response:
+    return web.Response(text=_index_html(), content_type="text/html")
 
 
 async def a_whoami(request: web.Request) -> web.Response:

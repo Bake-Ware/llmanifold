@@ -382,3 +382,18 @@ async def test_failed_request_records_a_readable_trail(stack):
     await s.api.post("/v1/chat/completions", json=chat())
     err = s.core.recent[0]["error"]
     assert err.startswith("boom") and "deepseek skipped: metered endpoint needs a token" in err
+
+
+async def test_reasoning_only_answer_is_not_empty(stack):
+    """A thinking model that hits max_tokens mid-thought returns content=null; that's an answer."""
+    s = await stack({"a": {"kind": "openai", "fake": {"mode": "think"}}, "fb": {"kind": "openai"}},
+                    {"qwen": {"pool": ["a"], "fallback": ["fb"]}})
+    r = await s.api.post("/v1/chat/completions", json=chat())
+    assert r.status == 200
+    assert (await r.json())["choices"][0]["message"]["reasoning_content"]
+    r = await s.api.post("/v1/chat/completions", json=chat(stream=True))
+    assert r.status == 200 and "reasoning_content" in "".join(await read_sse(r))
+    assert not s.fakes["fb"].bodies                      # no fallback happened
+    r = await s.api.post("/v1/messages", json={"model": "qwen", "max_tokens": 5,
+                                                 "messages": [{"role": "user", "content": "hi"}]})
+    assert (await r.json())["content"][0]["type"] == "thinking"

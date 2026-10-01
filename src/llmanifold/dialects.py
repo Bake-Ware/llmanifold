@@ -231,6 +231,9 @@ def openai_to_anthropic_response(resp: dict, model: str | None = None) -> dict:
     choice = (resp.get("choices") or [{}])[0]
     msg = choice.get("message") or {}
     content: list[dict] = []
+    thought = reasoning_of(msg)
+    if thought:
+        content.append({"type": "thinking", "thinking": thought, "signature": ""})
     t = text_of(msg.get("content"))
     if t:
         content.append({"type": "text", "text": t})
@@ -252,16 +255,20 @@ def openai_to_anthropic_response(resp: dict, model: str | None = None) -> dict:
 
 
 def anthropic_to_openai_response(resp: dict, model: str | None = None) -> dict:
-    texts, calls = [], []
+    texts, calls, thoughts = [], [], []
     for b in resp.get("content") or []:
         if b.get("type") == "text":
             texts.append(b.get("text", ""))
+        elif b.get("type") == "thinking":
+            thoughts.append(b.get("thinking", ""))
         elif b.get("type") == "tool_use":
             calls.append({"id": b.get("id") or _id("call_"), "type": "function",
                           "function": {"name": b.get("name", ""), "arguments": json.dumps(b.get("input") or {})}})
     msg: dict[str, Any] = {"role": "assistant", "content": "".join(texts) if texts or not calls else None}
     if calls:
         msg["tool_calls"] = calls
+    if thoughts:
+        msg["reasoning_content"] = "".join(thoughts)
     usage = resp.get("usage") or {}
     pin, pout = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
     return {"id": resp.get("id") or _id("chatcmpl-"), "object": "chat.completion", "created": int(time.time()),
@@ -284,11 +291,20 @@ def translate_response(resp: dict, src: str, dst: str, model: str | None = None)
     raise ValueError(f"no translation {src} -> {dst}")
 
 
+def reasoning_of(d: dict) -> str:
+    """Reasoning text from an OpenAI-style message or delta (llama.cpp/vLLM/DeepSeek naming)."""
+    r = d.get("reasoning_content") or d.get("reasoning") or ""
+    return r if isinstance(r, str) else text_of(r)
+
+
 def response_has_content(resp: dict, dialect: str) -> bool:
+    """Did the model produce anything? Reasoning counts: a thinking model that spent its whole
+    budget reasoning (finish_reason=length, content null) answered; it isn't a broken engine."""
     if dialect == "openai":
         msg = ((resp.get("choices") or [{}])[0]).get("message") or {}
-        return bool(text_of(msg.get("content")).strip() or msg.get("tool_calls"))
+        return bool(text_of(msg.get("content")).strip() or msg.get("tool_calls") or reasoning_of(msg).strip())
     return any((b.get("type") == "text" and (b.get("text") or "").strip()) or b.get("type") == "tool_use"
+               or (b.get("type") == "thinking" and (b.get("thinking") or "").strip())
                for b in resp.get("content") or [])
 
 
@@ -399,7 +415,7 @@ class OpenAIPassthrough(_StreamBase):
             self.error = text_of(json.dumps(j["error"]))
         for ch in j.get("choices") or []:
             d = ch.get("delta") or {}
-            if (d.get("content") or "") or d.get("tool_calls"):
+            if (d.get("content") or "") or d.get("tool_calls") or reasoning_of(d):
                 self.has_content = True
                 self.deltas += 1
             if ch.get("finish_reason"):
@@ -439,7 +455,8 @@ class AnthropicPassthrough(_StreamBase):
             self.has_content = True
         elif t == "content_block_delta":
             d = j.get("delta") or {}
-            if (d.get("type") == "text_delta" and d.get("text")) or d.get("type") == "input_json_delta":
+            if ((d.get("type") == "text_delta" and d.get("text")) or d.get("type") == "input_json_delta"
+                    or (d.get("type") == "thinking_delta" and d.get("thinking"))):
                 self.has_content = True
                 self.deltas += 1
         elif t == "message_delta":
@@ -456,7 +473,7 @@ class OpenAIToAnthropicStream(_StreamBase):
     def __init__(self, model: str | None) -> None:
         super().__init__(model)
         self._started = False
-        self._open: tuple[str, int] | None = None     # ("text"|"tool", anthropic index)
+        self._open: tuple[str, int] | None = None     # ("thinking"|"text"|"tool", anthropic index)
         self._next = 0
         self._tools: dict[int, int] = {}              # openai tool index -> anthropic block index
         self._finish: str | None = None
@@ -495,6 +512,20 @@ class OpenAIToAnthropicStream(_StreamBase):
             self.tokens_out = u.get("completion_tokens") or self.tokens_out
         for ch in j.get("choices") or []:
             d = ch.get("delta") or {}
+            thought = reasoning_of(d)
+            if thought:
+                if not self._open or self._open[0] != "thinking":
+                    out += self._close()
+                    idx = self._next
+                    self._next += 1
+                    self._open = ("thinking", idx)
+                    out.append(sse({"type": "content_block_start", "index": idx,
+                                    "content_block": {"type": "thinking", "thinking": "", "signature": ""}},
+                                   "content_block_start"))
+                out.append(sse({"type": "content_block_delta", "index": self._open[1],
+                                "delta": {"type": "thinking_delta", "thinking": thought}}, "content_block_delta"))
+                self.has_content = True
+                self.deltas += 1
             text = d.get("content")
             if text:
                 if not self._open or self._open[0] != "text":
@@ -586,6 +617,10 @@ class AnthropicToOpenAIStream(_StreamBase):
                 self.has_content = True
                 self.deltas += 1
                 return [self._chunk({"content": d["text"]})]
+            if d.get("type") == "thinking_delta" and d.get("thinking"):
+                self.has_content = True
+                self.deltas += 1
+                return [self._chunk({"reasoning_content": d["thinking"]})]
             if d.get("type") == "input_json_delta":
                 k = self._tools.get(j.get("index", 0), 0)
                 return [self._chunk({"tool_calls": [{"index": k, "function": {"arguments": d.get("partial_json", "")}}]})]

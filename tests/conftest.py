@@ -16,7 +16,7 @@ from llmanifold.store import Store
 
 @dataclass
 class FakeState:
-    mode: str = "ok"            # ok | 500 | 429 | context | badreq | empty | stream_error | midfail
+    mode: str = "ok"            # ok | 500 | 429 | context | badreq | empty | stream_error | midfail | think
     text: str = "hello from fake"
     tool: bool = False
     delay: float = 0.0          # before the first byte
@@ -51,7 +51,24 @@ def fake_openai(state: FakeState) -> web.Application:
                                          status=400)
             if m == "badreq":
                 return web.json_response({"error": {"message": "temperature must be <= 2"}}, status=400)
-            text = "" if m in ("empty", "stream_error") else state.text
+            text = "" if m in ("empty", "stream_error", "think") else state.text
+            if m == "think":   # a reasoning model that spent its whole budget thinking
+                thought = "let me think about this"
+                if not body.get("stream"):
+                    return web.json_response({"id": "x", "object": "chat.completion", "model": body.get("model"),
+                                              "choices": [{"index": 0, "finish_reason": "length", "message": {
+                                                  "role": "assistant", "content": None,
+                                                  "reasoning_content": thought}}],
+                                              "usage": {"prompt_tokens": 7, "completion_tokens": 5}})
+                resp = web.StreamResponse()
+                resp.content_type = "text/event-stream"
+                await resp.prepare(req)
+                base = {"id": "c", "object": "chat.completion.chunk", "model": body.get("model")}
+                for w in thought.split(" "):
+                    await resp.write(_sse({**base, "choices": [{"index": 0, "delta": {"reasoning_content": w + " "}}]}))
+                await resp.write(_sse({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]}))
+                await resp.write(b"data: [DONE]\n\n")
+                return resp
             words = text.split(" ") if text else []
             if not body.get("stream"):
                 msg = {"role": "assistant", "content": text}

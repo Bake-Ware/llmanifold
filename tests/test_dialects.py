@@ -79,6 +79,9 @@ def test_response_round_trips():
 
 def test_content_detection_and_context_errors():
     assert not D.response_has_content({"choices": [{"message": {"content": "  "}}]}, "openai")
+    # a reasoning model that ran out of budget mid-thought still answered
+    assert D.response_has_content({"choices": [{"message": {"content": None, "reasoning_content": "hmm"}}]}, "openai")
+    assert D.response_has_content({"content": [{"type": "thinking", "thinking": "hmm"}]}, "anthropic")
     assert D.response_has_content({"content": [{"type": "tool_use"}]}, "anthropic")
     assert D.is_context_error(400, "prompt exceeds the context (262144)")
     assert D.is_context_error(400, "This model's maximum context length is 8192 tokens")
@@ -158,3 +161,25 @@ def test_passthrough_detects_stream_error():
     tr = D.OpenAIPassthrough("m")
     tr.feed(None, json.dumps({"error": {"message": "x"}}), b"")
     assert tr.error and not tr.has_content
+
+
+def test_reasoning_translates_to_thinking_and_back():
+    oa = {"choices": [{"message": {"content": "hi", "reasoning_content": "think"}, "finish_reason": "stop"}]}
+    an = D.translate_response(oa, "openai", "anthropic")
+    assert [b["type"] for b in an["content"]] == ["thinking", "text"]
+    back = D.translate_response(an, "anthropic", "openai")
+    assert back["choices"][0]["message"]["reasoning_content"] == "think"
+
+    t = D.stream_translator("openai", "anthropic", "m", False)
+    out = b""
+    for ev in D.SSEParser().feed(_oa_chunks({"reasoning_content": "a"}, {"content": "b"})):
+        out += b"".join(t.feed(*ev))
+    text = out.decode()
+    assert '"thinking_delta"' in text and '"text_delta"' in text and t.has_content
+    assert text.index("thinking_delta") < text.index("text_delta")
+
+    t = D.stream_translator("anthropic", "openai", "m", False)
+    ev = D.sse({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "x"}},
+               "content_block_delta")
+    (name, data, raw), = D.SSEParser().feed(ev)
+    assert b"reasoning_content" in b"".join(t.feed(name, data, raw)) and t.has_content

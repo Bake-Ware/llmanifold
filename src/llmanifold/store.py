@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS requests (
   error TEXT
 );
 CREATE INDEX IF NOT EXISTS requests_ts ON requests(ts);
+CREATE TABLE IF NOT EXISTS paused (
+  endpoint TEXT PRIMARY KEY,
+  since REAL NOT NULL,
+  paused_by TEXT
+);
 """
 
 TOKEN_PREFIX = "llm_"
@@ -97,6 +102,17 @@ class Store:
                     "ON CONFLICT(model) DO UPDATE SET mode=excluded.mode, updated=excluded.updated, "
                     "updated_by=excluded.updated_by", (model, mode, time.time(), by))
             self._auth_cache[model] = mode
+
+    # ---- paused endpoints (survive restarts)
+    def paused(self) -> dict[str, dict]:
+        return {r["endpoint"]: r for r in self._q("SELECT endpoint, since, paused_by FROM paused")}
+
+    def set_paused(self, endpoint: str, paused: bool, by: str | None) -> None:
+        if paused:
+            self._x("INSERT INTO paused(endpoint, since, paused_by) VALUES(?,?,?) "
+                    "ON CONFLICT(endpoint) DO NOTHING", (endpoint, time.time(), by))
+        else:
+            self._x("DELETE FROM paused WHERE endpoint=?", (endpoint,))
 
     # ---- tokens
     def create_token(self, label: str, models: list[str], background: bool, by: str | None) -> dict:
@@ -164,6 +180,64 @@ class Store:
             "SELECT CAST(ts/? AS INTEGER)*? AS t, endpoint, COUNT(*) AS requests, "
             "SUM(COALESCE(tokens_out,0)) AS tokens_out, SUM(1-ok) AS errors "
             "FROM requests WHERE ts>=? GROUP BY t, endpoint ORDER BY t", (bucket, bucket, since))
+
+    def history(self, minutes: int, bucket: int, endpoints: list[str]) -> dict:
+        """Per-bucket request counts, speed and first-token latency for the charts, plus the
+        latest failures and fallbacks in the window."""
+        now = time.time()
+        since = now - minutes * 60
+        start = int(since // bucket) * bucket
+        n = int((now - start) // bucket) + 1
+        rows = self._q("SELECT ts, model, endpoint, ok, fallback, metered, tokens_out, ttft_ms, tps "
+                       "FROM requests WHERE ts>=? ORDER BY ts", (since,))
+        known = list(endpoints)
+        seen = {r["endpoint"] for r in rows if r["endpoint"]}
+        known += sorted(seen - set(known))           # endpoints since removed from the config
+        buckets = [{"t": start + i * bucket, "requests": {}, "errors": 0, "fallbacks": 0, "metered": 0,
+                    "tokens_out": 0, "_tps": {}, "_ttft": []} for i in range(n)]
+        tot = {"requests": 0, "ok": 0, "errors": 0, "fallbacks": 0, "metered": 0, "tokens_out": 0, "_ttft": []}
+        for r in rows:
+            i = min(n - 1, max(0, int((r["ts"] - start) // bucket)))
+            b = buckets[i]
+            ep = r["endpoint"]
+            tot["requests"] += 1
+            if r["ok"]:
+                tot["ok"] += 1
+                if ep:
+                    b["requests"][ep] = b["requests"].get(ep, 0) + 1
+            else:
+                b["errors"] += 1
+                tot["errors"] += 1
+            for k in ("fallback", "metered"):
+                if r[k]:
+                    b[k + "s" if k == "fallback" else k] += 1
+                    tot[k + "s" if k == "fallback" else k] += 1
+            b["tokens_out"] += r["tokens_out"] or 0
+            tot["tokens_out"] += r["tokens_out"] or 0
+            if r["tps"] and ep:
+                b["_tps"].setdefault(ep, []).append(r["tps"])
+            if r["ttft_ms"] is not None and r["ok"]:
+                b["_ttft"].append(r["ttft_ms"])
+                tot["_ttft"].append(r["ttft_ms"])
+
+        def pct(xs: list, q: float):
+            if not xs:
+                return None
+            xs = sorted(xs)
+            return xs[min(len(xs) - 1, int(round(q * (len(xs) - 1))))]
+
+        for b in buckets:
+            b["tps"] = {ep: round(sum(v) / len(v), 1) for ep, v in b.pop("_tps").items()}
+            t = b.pop("_ttft")
+            b["ttft_p50"], b["ttft_p95"] = pct(t, 0.5), pct(t, 0.95)
+        t = tot.pop("_ttft")
+        tot["ttft_p50"], tot["ttft_p95"] = pct(t, 0.5), pct(t, 0.95)
+        problems = self._q("SELECT * FROM requests WHERE ts>=? AND (ok=0 OR fallback=1) ORDER BY ts DESC LIMIT 25",
+                           (since,))
+        for r in problems:
+            r["attempts"] = json.loads(r["attempts"] or "[]")
+        return {"bucket": bucket, "start": start, "now": now, "endpoints": known, "buckets": buckets,
+                "totals": tot, "problems": problems}
 
     def prune(self, days: int) -> int:
         return self._x("DELETE FROM requests WHERE ts<?", (time.time() - days * 86400,)).rowcount

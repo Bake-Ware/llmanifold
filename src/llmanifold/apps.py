@@ -22,7 +22,8 @@ from aiohttp import web
 
 from . import __version__
 from . import dialects as D
-from .config import Config, ConfigError, load
+from .config import DIALECTS, PROBES, TRIGGERS, Config, ConfigError, load
+from .editor import ENDPOINT_FIELDS, FLOW_FIELDS, EditError
 from .proxy import Core, estimate_tokens
 
 log = logging.getLogger("llmanifold")
@@ -216,6 +217,7 @@ def model_rows(core: Core) -> list[dict]:
                      "queue_timeout": m.queue_timeout, "first_token_timeout": m.first_token_timeout,
                      "background_max_lanes": m.background_max_lanes, "context": m.context,
                      "queued": core.router.queue_depth(m.name), "warning": warn,
+                     "default": bool(core.cfg.default_model and core.cfg.resolve(core.cfg.default_model) is m),
                      "description": m.description})
     return rows
 
@@ -228,6 +230,7 @@ async def a_status(request: web.Request) -> web.Response:
         "endpoints": [s.snapshot() for s in core.router.states.values()],
         "models": model_rows(core), "queue": core.router.queue(), "who": request["who"],
         "listen": {"api": core.cfg.api_listen, "admin": core.cfg.admin_listen},
+        "editable": bool(core.editor and core.editor.writable),
         "webhooks": [{"url": w.url.split("?")[0], "events": list(w.events)} for w in core.cfg.webhooks]})
 
 
@@ -249,13 +252,149 @@ async def a_timeseries(request: web.Request) -> web.Response:
 
 
 async def a_drain(request: web.Request) -> web.Response:
+    """Pause/resume an endpoint (drain/undrain are the older names). Allowed for any admin
+    caller, agents included: it's reversible and stops no running request."""
     core = request.app[CORE]
     name = request.match_info["name"]
-    on = request.match_info["action"] == "drain"
-    if not await core.router.set_draining(name, on):
+    on = request.match_info["action"] in ("drain", "pause")
+    who = request["who"]
+    if not await core.set_paused(name, on, who.get("email") or who.get("ip")):
         return web.json_response({"error": f"unknown endpoint {name!r}"}, status=404)
-    log.info("%s %s by %s", "drain" if on else "undrain", name, request["who"])
-    return web.json_response({"ok": True, "endpoint": name, "draining": on})
+    log.info("%s %s by %s", "pause" if on else "resume", name, who)
+    return web.json_response({"ok": True, "endpoint": name, "draining": on, "paused": on})
+
+
+# ---- config editing (people only)
+
+def _endpoint_spec(core: Core, name: str) -> dict:
+    e = core.cfg.endpoints[name]
+    out = {f: getattr(e, f) for f in ENDPOINT_FIELDS}
+    out["key"] = ("file" if e.key_file else "env" if e.key_env else "literal" if e.key else None)
+    out["key_set"] = bool(e.api_key())
+    out["flows"] = [m.name for m in core.cfg.models.values() if name in m.pool or name in m.fallback]
+    return out
+
+
+async def a_config(request: web.Request) -> web.Response:
+    core = request.app[CORE]
+    return web.json_response({
+        "path": core.cfg.path, "writable": bool(core.editor and core.editor.writable),
+        "default_model": core.cfg.default_model,
+        "endpoints": {n: _endpoint_spec(core, n) for n in core.cfg.endpoints},
+        "flows": {m.name: {f: (list(getattr(m, f)) if isinstance(getattr(m, f), (list, tuple)) else getattr(m, f))
+                           for f in FLOW_FIELDS} for m in core.cfg.models.values()},
+        "choices": {"dialect": list(DIALECTS), "probe": list(PROBES), "fallback_on": list(TRIGGERS)}})
+
+
+async def _config_edit(request: web.Request, what: str, coro_fn) -> web.Response:
+    if (deny := _human(request)) is not None:
+        return deny
+    core = request.app[CORE]
+    if core.editor is None:
+        return web.json_response({"error": "llmanifold wasn't started from a config file, so it can't save changes"},
+                                 status=409)
+    try:
+        cfg = await coro_fn(core.editor)
+    except EditError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except OSError as e:
+        return web.json_response({"error": f"couldn't write the config: {e}"}, status=500)
+    core.apply_config(cfg)
+    log.info("config edit (%s) by %s", what, request["who"].get("email") or request["who"]["ip"])
+    return web.json_response({"ok": True})
+
+
+async def _body(request: web.Request) -> dict:
+    try:
+        b = await request.json()
+    except ValueError:
+        return {}
+    return b if isinstance(b, dict) else {}
+
+
+def _split_endpoint_body(b: dict) -> tuple[dict, str | None, bool]:
+    fields = {k: b[k] for k in ENDPOINT_FIELDS if k in b}
+    key = str(b.get("key") or "").strip() or None
+    return fields, key, bool(b.get("clear_key"))
+
+
+async def a_endpoint_create(request: web.Request) -> web.Response:
+    b = await _body(request)
+    fields, key, clear = _split_endpoint_body(b)
+    return await _config_edit(request, f"add model {b.get('name')}", lambda ed: ed.save_endpoint(
+        str(b.get("name") or ""), fields, create=True, key=key, clear_key=clear))
+
+
+async def a_endpoint_update(request: web.Request) -> web.Response:
+    b = await _body(request)
+    fields, key, clear = _split_endpoint_body(b)
+    name = request.match_info["name"]
+    return await _config_edit(request, f"edit model {name}", lambda ed: ed.save_endpoint(
+        name, fields, create=False, key=key, clear_key=clear))
+
+
+async def a_endpoint_delete(request: web.Request) -> web.Response:
+    name = request.match_info["name"]
+    force = request.query.get("force") in ("1", "true", "yes")
+    resp = await _config_edit(request, f"remove model {name}", lambda ed: ed.delete_endpoint(name, force=force))
+    if resp.status == 200:
+        await asyncio.to_thread(request.app[CORE].store.set_paused, name, False, None)
+        request.app[CORE].router.paused.discard(name)
+    return resp
+
+
+async def a_endpoint_test(request: web.Request) -> web.Response:
+    if (deny := _human(request)) is not None:
+        return deny
+    core = request.app[CORE]
+    b = await _body(request)
+    url = str(b.get("url") or "").strip()
+    if not url:
+        return web.json_response({"error": "a URL is required"}, status=400)
+    key = str(b.get("key") or "").strip() or None
+    if key is None and b.get("name") in core.cfg.endpoints:
+        key = core.cfg.endpoints[b["name"]].api_key()
+    return web.json_response(await core.test_endpoint(url, b.get("dialect") or "openai", key))
+
+
+async def a_flow_create(request: web.Request) -> web.Response:
+    b = await _body(request)
+    fields = {k: b[k] for k in FLOW_FIELDS if k in b}
+    return await _config_edit(request, f"add flow {b.get('name')}", lambda ed: ed.save_flow(
+        str(b.get("name") or ""), fields, create=True))
+
+
+async def a_flow_update(request: web.Request) -> web.Response:
+    b = await _body(request)
+    fields = {k: b[k] for k in FLOW_FIELDS if k in b}
+    name = request.match_info["name"]
+    return await _config_edit(request, f"edit flow {name}", lambda ed: ed.save_flow(name, fields, create=False))
+
+
+async def a_flow_delete(request: web.Request) -> web.Response:
+    name = request.match_info["name"]
+    return await _config_edit(request, f"remove flow {name}", lambda ed: ed.delete_flow(name))
+
+
+async def a_member_add(request: web.Request) -> web.Response:
+    b = await _body(request)
+    flow = request.match_info["name"]
+    return await _config_edit(request, f"add {b.get('endpoint')} to {flow}", lambda ed: ed.add_member(
+        flow, str(b.get("endpoint") or ""), str(b.get("role") or "pool")))
+
+
+async def a_member_remove(request: web.Request) -> web.Response:
+    flow, ep = request.match_info["name"], request.match_info["endpoint"]
+    return await _config_edit(request, f"remove {ep} from {flow}", lambda ed: ed.remove_member(flow, ep))
+
+
+RANGES = {"1h": (60, 60), "6h": (360, 300), "24h": (1440, 900), "7d": (10080, 7200)}
+
+
+async def a_history(request: web.Request) -> web.Response:
+    core = request.app[CORE]
+    minutes, bucket = RANGES.get(request.query.get("range", "1h"), RANGES["1h"])
+    return web.json_response(await asyncio.to_thread(core.store.history, minutes, bucket, list(core.cfg.endpoints)))
 
 
 async def a_reload(request: web.Request) -> web.Response:
@@ -349,7 +488,18 @@ def build_admin_app(core: Core) -> web.Application:
     r.add_get("/api/status", a_status)
     r.add_get("/api/requests", a_requests)
     r.add_get("/api/timeseries", a_timeseries)
-    r.add_post("/api/endpoints/{name}/{action:drain|undrain}", a_drain)
+    r.add_post("/api/endpoints/{name}/{action:drain|undrain|pause|resume}", a_drain)
+    r.add_get("/api/config", a_config)
+    r.add_get("/api/history", a_history)
+    r.add_post("/api/endpoints", a_endpoint_create)
+    r.add_post("/api/test-endpoint", a_endpoint_test)
+    r.add_put("/api/endpoints/{name}", a_endpoint_update)
+    r.add_delete("/api/endpoints/{name}", a_endpoint_delete)
+    r.add_post("/api/flows", a_flow_create)
+    r.add_put("/api/flows/{name}", a_flow_update)
+    r.add_delete("/api/flows/{name}", a_flow_delete)
+    r.add_post("/api/flows/{name}/members", a_member_add)
+    r.add_delete("/api/flows/{name}/members/{endpoint}", a_member_remove)
     r.add_post("/api/reload", a_reload)
     r.add_get("/api/tokens", a_tokens)
     r.add_post("/api/tokens", a_token_create)

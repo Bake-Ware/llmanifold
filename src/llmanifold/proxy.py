@@ -23,6 +23,7 @@ from aiohttp import web
 
 from . import dialects as D
 from .config import Config, Model
+from .editor import ConfigEditor
 from .router import EndpointState, Router
 from .store import Store
 
@@ -206,7 +207,8 @@ class Core:
     def __init__(self, cfg: Config, store: Store) -> None:
         self.cfg = cfg
         self.store = store
-        self.router = Router(cfg)
+        self.router = Router(cfg, set(store.paused()))
+        self.editor = ConfigEditor(cfg.path, cfg.data_dir) if cfg.path else None
         self.session: aiohttp.ClientSession | None = None
         self.recent: deque[dict] = deque(maxlen=500)
         self.started = time.time()
@@ -236,6 +238,45 @@ class Core:
         self.cfg = cfg
         self.router.update(cfg)
         self.reload_error = None
+
+    async def set_paused(self, name: str, paused: bool, by: str | None) -> bool:
+        """Pause (stop routing new requests to) or resume an endpoint. Survives restarts."""
+        if not await self.router.set_draining(name, paused):
+            return False
+        await asyncio.to_thread(self.store.set_paused, name, paused, by)
+        return True
+
+    async def test_endpoint(self, url: str, dialect: str, key: str | None) -> dict:
+        """Ask an endpoint which models it serves: proves the URL and key work before saving."""
+        url = url.rstrip("/")
+        if url.endswith("/v1"):
+            url = url[:-3]
+        headers = {}
+        if key:
+            if dialect == "anthropic":
+                headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
+            else:
+                headers["Authorization"] = f"Bearer {key}"
+        elif dialect == "anthropic":
+            headers["anthropic-version"] = "2023-06-01"
+        t0 = time.monotonic()
+        try:
+            async with self.session.get(url + "/v1/models", headers=headers,
+                                        timeout=aiohttp.ClientTimeout(total=10, sock_connect=5)) as r:
+                text = await r.text()
+                ms = int((time.monotonic() - t0) * 1000)
+                if r.status >= 400:
+                    return {"ok": False, "status": r.status, "ms": ms,
+                            "error": _upstream_message(text) or f"HTTP {r.status}"}
+                try:
+                    data = json.loads(text)
+                except ValueError:
+                    return {"ok": False, "ms": ms, "error": "answered, but not with JSON: is this the API's base URL?"}
+                items = data.get("data") if isinstance(data, dict) else data
+                ids = [m.get("id") for m in items or [] if isinstance(m, dict) and m.get("id")]
+                return {"ok": True, "ms": ms, "models": ids[:200]}
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}".rstrip(": ")}
 
     # ---------------------------------------------------------------- health + busy probes
     async def probe(self, st: EndpointState) -> None:

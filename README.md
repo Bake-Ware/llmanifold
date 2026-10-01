@@ -10,6 +10,8 @@ Anthropic API shapes on the way.
 
 ![Dashboard](docs/dashboard.png)
 
+![Request charts](docs/requests.png)
+
 - **Pools.** Put several endpoints behind one model name. Requests go to the
   least-loaded one, and a conversation sticks to the endpoint that served it
   last (warm prompt cache). Choosing and reserving a lane happen atomically, so
@@ -31,9 +33,13 @@ Anthropic API shapes on the way.
 - **Tokens per model.** A model is `open` or needs a token. Tokens are created,
   scoped and revoked by a person in the admin site; agents can read status and
   drain endpoints, but can't mint tokens or change who needs one.
-- **Dashboard.** Live lanes, queue, request history (SQLite, 30 days by
-  default) and token management, on a separate admin listener. Prometheus
-  metrics at `/metrics`.
+- **Dashboard.** Live alias flows and lanes, charts of traffic, speed and
+  time to first token (SQLite history, 30 days by default), and token
+  management, on a separate admin listener. People signed in through the admin
+  site can add, edit, pause and remove models (including paid APIs, with a
+  connection test) and build alias flows; changes are written back to the YAML
+  file with comments kept, and API keys go to files only llmanifold can read.
+  Prometheus metrics at `/metrics`.
 - **Proxy-friendly.** Keepalives (SSE comments, or leading whitespace on JSON)
   stop proxies like Cloudflare from cutting long generations at ~100 s.
 
@@ -63,6 +69,13 @@ Everything lives in one YAML file; see
 The file is watched and reloaded on change (or `llmanifold ctl reload`); a
 broken edit is rejected and the running config stays in place, with the
 error shown in the dashboard.
+
+Changes made in the admin site are written to the same file: comments, order
+and list style are kept, the previous version is saved next to it as
+`config.yaml.bak-<time>` (the last 20 are kept), and keys typed into the site
+are stored in `<data_dir>/keys/` (mode 600) and referenced with `key_file`.
+The admin site calls endpoints **models** and config models **alias flows**.
+Pausing a model (from the site, `ctl drain`, or Rook) survives restarts.
 
 ```yaml
 endpoints:

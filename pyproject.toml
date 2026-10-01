@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmanifold"
-version = "0.1.0"
+version = "0.2.0"
 description = "One front door for many LLM endpoints: pools, fallbacks, OpenAI/Anthropic translation, and a dashboard."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
-dependencies = ["aiohttp>=3.9", "PyYAML>=6"]
+dependencies = ["aiohttp>=3.9", "PyYAML>=6", "ruamel.yaml>=0.18"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-aiohttp>=1.0"]

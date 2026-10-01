@@ -100,9 +100,11 @@ class _Waiter:
 
 
 class Router:
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, paused: set[str] | None = None) -> None:
         self.cfg = cfg
-        self.states: dict[str, EndpointState] = {n: EndpointState(e) for n, e in cfg.endpoints.items()}
+        self.paused: set[str] = set(paused or ())
+        self.states: dict[str, EndpointState] = {n: EndpointState(e, draining=n in self.paused)
+                                                 for n, e in cfg.endpoints.items()}
         self._cond = asyncio.Condition()
         self._waiting: list[_Waiter] = []
         self._seq = itertools.count()
@@ -115,7 +117,7 @@ class Router:
         for n, e in cfg.endpoints.items():
             st = self.states.get(n)
             if st is None:
-                st = EndpointState(e)
+                st = EndpointState(e, draining=n in self.paused)
             else:
                 st.cfg = e
             new[n] = st
@@ -244,5 +246,6 @@ class Router:
             if st is None:
                 return False
             st.draining = draining
+            (self.paused.add if draining else self.paused.discard)(name)
             self._cond.notify_all()
             return True

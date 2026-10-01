@@ -8,8 +8,10 @@ from dataclasses import dataclass, field
 import pytest
 from aiohttp import web
 
+import yaml
+
 from llmanifold.apps import build_admin_app, build_api_app
-from llmanifold.config import parse
+from llmanifold.config import load, parse
 from llmanifold.proxy import Core
 from llmanifold.store import Store
 
@@ -213,8 +215,10 @@ async def stack(aiohttp_server, aiohttp_client, tmp_path):
             hsrv = await aiohttp_server(happ)
             top.setdefault("webhooks", [{"url": str(hsrv.make_url("/hook"))}])
         raw = {"data_dir": str(tmp_path), "endpoints": eps, "models": models, "keepalive_after": 0, **top}
-        cfg = parse(raw)
-        store = Store(tmp_path / "t.db")
+        path = tmp_path / f"config{len(made)}.yaml"
+        path.write_text("# test config\n" + yaml.safe_dump(raw, sort_keys=False))
+        cfg = load(path)
+        store = Store(tmp_path / f"t{len(made)}.db")
         core = Core(cfg, store)
         await core.start()
         api = await aiohttp_client(build_api_app(core))

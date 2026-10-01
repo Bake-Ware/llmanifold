@@ -30,8 +30,13 @@
 
   <div class="banner" id="banner" hidden></div>
 
+  <!-- ============================================================ overview -->
   <section class="view" id="view-overview">
     <div class="tiles" id="tiles"></div>
+    <div class="section-head">
+      <h2>Alias flows</h2>
+      <button class="edit-only" id="new-flow">New alias flow</button>
+    </div>
     <div class="manifold" id="manifold"></div>
     <section class="panel">
       <h2>Waiting for a lane</h2>
@@ -39,30 +44,47 @@
     </section>
   </section>
 
+  <!-- ============================================================ requests -->
   <section class="view" id="view-requests" hidden>
+    <div class="filters">
+      <span class="seg" role="group" aria-label="Time range" id="range">
+        <button data-range="1h" aria-pressed="true">Last hour</button>
+        <button data-range="6h" aria-pressed="false">6 hours</button>
+        <button data-range="24h" aria-pressed="false">24 hours</button>
+        <button data-range="7d" aria-pressed="false">7 days</button>
+      </span>
+    </div>
+    <div class="tiles tiles-6" id="req-tiles"></div>
+    <div id="charts" class="charts"></div>
     <section class="panel">
-      <div class="panel-head">
-        <h2>Recent requests</h2>
-        <label class="filter">Show <select id="req-filter">
-          <option value="all">all</option><option value="errors">failures</option>
-          <option value="fallback">fallbacks</option><option value="metered">metered</option>
-        </select></label>
-      </div>
-      <div class="table-wrap"><table class="grid" id="requests">
-        <thead><tr><th>Time</th><th>Model</th><th>Served by</th><th>Client</th><th>Tokens in / out</th>
-          <th>First token</th><th>Speed</th><th>Result</th></tr></thead>
+      <h2>Latest failures and fallbacks</h2>
+      <div class="table-wrap"><table class="grid" id="problems">
+        <thead><tr><th>Time</th><th>Flow</th><th>Served by</th><th>Client</th><th>What happened</th></tr></thead>
         <tbody></tbody>
       </table></div>
     </section>
   </section>
 
+  <!-- ============================================================ models and tokens -->
   <section class="view" id="view-access" hidden>
     <section class="panel">
-      <h2>Models</h2>
-      <p class="muted">A model is <b>open</b> (anyone who can reach the API may use it) or needs a <b>token</b>.
+      <div class="panel-head">
+        <h2>Models</h2>
+        <button class="edit-only" id="add-model">Add model</button>
+      </div>
+      <p class="muted">Everything llmanifold can send a request to: engines on your machines and paid APIs.
+        Put models into alias flows on the Overview.</p>
+      <div class="table-wrap"><table class="grid" id="endpoints">
+        <thead><tr><th>Model</th><th>Asks for</th><th>Kind</th><th>State</th><th>Used by</th><th>Key</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </section>
+    <section class="panel">
+      <h2>Who can use each flow</h2>
+      <p class="muted">A flow is <b>open</b> (anyone who can reach the API may use it) or needs a <b>token</b>.
         Only a person signed in through the admin site can change this.</p>
       <div class="table-wrap"><table class="grid" id="models">
-        <thead><tr><th>Model</th><th>Routes to</th><th>Falls back on</th><th>Access</th></tr></thead>
+        <thead><tr><th>Flow</th><th>Routes to</th><th>Falls back on</th><th>Access</th></tr></thead>
         <tbody></tbody>
       </table></div>
     </section>
@@ -70,19 +92,20 @@
       <div class="panel-head"><h2>Tokens</h2></div>
       <form id="token-form" class="token-form">
         <label>Label <input name="label" required placeholder="home-agent" autocomplete="off"></label>
-        <label>Models <input name="models" placeholder="* for all, or qwen,other" autocomplete="off"></label>
+        <label>Flows <input name="models" placeholder="* for all, or qwen,other" autocomplete="off"></label>
         <label class="check"><input type="checkbox" name="background"> Background traffic</label>
         <button type="submit">Create token</button>
       </form>
       <div class="new-token" id="new-token" hidden></div>
       <div class="table-wrap"><table class="grid" id="tokens">
-        <thead><tr><th>Label</th><th>Starts with</th><th>Models</th><th>Priority</th><th>Used</th><th>Last used</th><th></th></tr></thead>
+        <thead><tr><th>Label</th><th>Starts with</th><th>Flows</th><th>Priority</th><th>Used</th><th>Last used</th><th></th></tr></thead>
         <tbody></tbody>
       </table></div>
     </section>
   </section>
 </main>
 
+<!-- ============================================================ dialogs -->
 <dialog id="confirm" class="confirm">
   <form method="dialog">
     <h2 id="confirm-title"></h2>
@@ -93,6 +116,117 @@
     </div>
   </form>
 </dialog>
+
+<dialog id="member-dialog" class="confirm form-dialog">
+  <form id="member-form">
+    <h2>Add a model</h2>
+    <p class="muted small sub">to <b id="member-flow"></b></p>
+    <label class="field">Model
+      <select name="endpoint" required></select>
+    </label>
+    <fieldset class="field">
+      <legend>How it's used</legend>
+      <label class="radio"><input type="radio" name="role" value="pool" checked>
+        <span><b>Shares the load.</b> Requests go to whichever pool model is free.</span></label>
+      <label class="radio"><input type="radio" name="role" value="fallback">
+        <span><b>Fallback.</b> Only tried when the pool fails or is too busy, in the order listed.</span></label>
+    </fieldset>
+    <p class="muted small">Need something that isn't listed? Add it under Models and tokens first.</p>
+    <p class="form-error" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" data-close>Cancel</button>
+      <button type="submit">Add to flow</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="flow-dialog" class="confirm form-dialog">
+  <form id="flow-form">
+    <h2>New alias flow</h2>
+    <label class="field">Name clients ask for
+      <input name="name" required autocomplete="off" placeholder="local-large" pattern="[A-Za-z0-9][A-Za-z0-9._:@+\-]*">
+    </label>
+    <label class="field">Other names it answers to <span class="opt">optional, comma separated</span>
+      <input name="aliases" autocomplete="off" placeholder="default, gpt-4o">
+    </label>
+    <fieldset class="field">
+      <legend>Models in this flow</legend>
+      <div id="flow-members" class="member-pick"></div>
+    </fieldset>
+    <p class="form-error" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" data-close>Cancel</button>
+      <button type="submit">Create flow</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="model-dialog" class="confirm form-dialog wide">
+  <form id="model-form" autocomplete="off">
+    <h2 id="model-title">Add a model</h2>
+    <label class="field" id="preset-field">Start from
+      <select name="preset">
+        <option value="local">An engine on your network (llama.cpp, Strata, vLLM…)</option>
+        <option value="deepseek">DeepSeek API</option>
+        <option value="anthropic">Anthropic API</option>
+        <option value="openai">OpenAI API</option>
+        <option value="openrouter">OpenRouter</option>
+        <option value="other">Another OpenAI-compatible API</option>
+      </select>
+    </label>
+    <div class="row2">
+      <label class="field">Name in llmanifold
+        <input name="name" required placeholder="strata-a" pattern="[A-Za-z0-9][A-Za-z0-9._:@+\-]*">
+      </label>
+      <label class="field">API type
+        <select name="dialect"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option></select>
+      </label>
+    </div>
+    <label class="field">Base URL
+      <input name="url" required placeholder="http://127.0.0.1:8080" inputmode="url">
+    </label>
+    <label class="field">API key <span class="opt" id="key-hint">only for paid APIs; stored in a file only llmanifold can read</span>
+      <input name="key" type="password" autocomplete="new-password" placeholder="sk-…">
+    </label>
+    <label class="check clear-key" hidden><input type="checkbox" name="clear_key"> Remove the saved key</label>
+    <div class="test-row">
+      <button type="button" class="secondary" id="test-model">Test connection</button>
+      <span id="test-result" class="muted small"></span>
+    </div>
+    <div class="row2">
+      <label class="field">Model name to ask for <span class="opt">blank: pass the client's through</span>
+        <input name="model" list="upstream-models" placeholder="deepseek-chat">
+        <datalist id="upstream-models"></datalist>
+      </label>
+      <label class="field">Requests at once
+        <input name="max_concurrency" type="number" min="1" max="256" value="1">
+      </label>
+    </div>
+    <div class="row2">
+      <label class="field">Context window <span class="opt">tokens, optional</span>
+        <input name="context" type="number" min="0" step="1024" placeholder="262144">
+      </label>
+      <label class="field">Health check
+        <select name="probe">
+          <option value="models">List models (any API)</option>
+          <option value="llamacpp">llama.cpp slots (also sees busy)</option>
+          <option value="strata">Strata status (also sees busy)</option>
+          <option value="none">None</option>
+        </select>
+      </label>
+    </div>
+    <label class="check"><input type="checkbox" name="metered"> Costs money per request
+      <span class="opt">anonymous callers won't fall back to it unless a flow allows that</span></label>
+    <label class="check"><input type="checkbox" name="fallback"> Only use as a fallback</label>
+    <p class="form-error" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" data-close>Cancel</button>
+      <button type="submit" id="model-save">Add model</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="tooltip" id="tooltip" role="tooltip" hidden></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

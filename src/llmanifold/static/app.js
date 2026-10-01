@@ -95,7 +95,8 @@
   }
   function laneHtml(e, flow, fallback) {
     const st = laneState(e);
-    const tags = [e.metered ? 'paid' : '', fallback ? 'fallback' : '', e.dialect === 'anthropic' ? 'anthropic api' : '']
+    const tags = [e.metered ? 'paid' : '', fallback ? (e.overflow_at ? `fallback · helps at ${e.overflow_at} waiting` : 'fallback') : '',
+      e.dialect === 'anthropic' ? 'anthropic api' : '']
       .filter(Boolean).join(' · ');
     const pause = e.draining
       ? `<button class="small" data-resume="${esc(e.name)}">Resume</button>`
@@ -151,6 +152,7 @@
           <div class="meta">${chips}</div>
           <div class="flow-actions edit-only">
             <button class="small secondary" data-add-member="${esc(m.name)}">Add model</button>
+            <button class="small secondary" data-flow-settings="${esc(m.name)}">Settings</button>
             <button class="small ghost" data-delete-flow="${esc(m.name)}">Delete flow</button>
           </div></div>
         <div class="pipes-cell"><svg class="pipes" aria-hidden="true"></svg></div>
@@ -468,7 +470,7 @@
   // ------------------------------------------------------------- model dialog (add / edit)
   const PRESETS = {
     local: { name: '', url: 'http://127.0.0.1:8080', dialect: 'openai', model: '', max_concurrency: 1, probe: 'llamacpp', metered: false, fallback: false },
-    deepseek: { name: 'deepseek', url: 'https://api.deepseek.com', dialect: 'openai', model: 'deepseek-chat', max_concurrency: 8, context: 131072, probe: 'models', metered: true, fallback: true },
+    deepseek: { name: 'deepseek', url: 'https://api.deepseek.com', dialect: 'openai', model: 'deepseek-chat', max_concurrency: 8, context: 131072, probe: 'models', metered: true, fallback: true, overflow_at: 5 },
     anthropic: { name: 'anthropic', url: 'https://api.anthropic.com', dialect: 'anthropic', model: '', max_concurrency: 4, context: 200000, probe: 'none', metered: true, fallback: false },
     openai: { name: 'openai', url: 'https://api.openai.com', dialect: 'openai', model: '', max_concurrency: 8, probe: 'models', metered: true, fallback: false },
     openrouter: { name: 'openrouter', url: 'https://openrouter.ai/api', dialect: 'openai', model: '', max_concurrency: 8, probe: 'models', metered: true, fallback: false },
@@ -477,7 +479,7 @@
   let editing = null;
   function fillModelForm(v) {
     const f = $('#model-form');
-    for (const k of ['name', 'url', 'dialect', 'model', 'max_concurrency', 'context', 'probe']) {
+    for (const k of ['name', 'url', 'dialect', 'model', 'max_concurrency', 'context', 'probe', 'overflow_at']) {
       if (k in v) f.elements[k].value = v[k] ?? '';
     }
     for (const k of ['metered', 'fallback']) if (k in v) f.elements[k].checked = !!v[k];
@@ -497,17 +499,17 @@
     if (name) {
       cfg = await api('/api/config');
       const sp = cfg.endpoints[name];
-      fillModelForm({ name, ...sp, context: sp.context || '' });
+      fillModelForm({ name, ...sp, context: sp.context || '', overflow_at: sp.overflow_at || '' });
       f.elements.key.placeholder = sp.key_set ? 'saved; leave blank to keep it' : 'sk-…';
       $('.clear-key', f).hidden = sp.key !== 'file';
     } else {
-      fillModelForm(PRESETS.local);
+      fillModelForm({ overflow_at: '', ...PRESETS.local });
       f.elements.key.placeholder = 'sk-…';
     }
     $('#model-dialog').showModal();
   }
   $('#model-form').elements.preset.addEventListener('change', (ev) => {
-    if (!editing) fillModelForm({ context: '', ...PRESETS[ev.target.value] });
+    if (!editing) fillModelForm({ context: '', overflow_at: '', ...PRESETS[ev.target.value] });
   });
   $('#test-model').addEventListener('click', async () => {
     const f = $('#model-form'), out = $('#test-result');
@@ -534,6 +536,7 @@
       url: el.url.value.trim(), dialect: el.dialect.value, model: el.model.value.trim() || null,
       max_concurrency: Number(el.max_concurrency.value) || 1, context: el.context.value ? Number(el.context.value) : null,
       probe: el.probe.value, metered: el.metered.checked, fallback: el.fallback.checked,
+      overflow_at: el.overflow_at.value ? Number(el.overflow_at.value) : null,
     };
     if (el.key.value.trim()) body.key = el.key.value.trim();
     if (editing && el.clear_key.checked) body.clear_key = true;
@@ -611,6 +614,33 @@
     } catch (e) { formError(f, e.message); }
   });
   $('#new-flow').addEventListener('click', openFlowDialog);
+
+  async function openSettingsDialog(flow) {
+    const f = $('#settings-form');
+    f.reset();
+    formError(f, '');
+    cfg = await api('/api/config');
+    const m = cfg.flows[flow];
+    $('#settings-flow').textContent = flow;
+    f.dataset.flow = flow;
+    f.elements.queue_timeout.value = m.queue_timeout;
+    f.elements.background_max_lanes.value = m.background_max_lanes ?? '';
+    f.elements.allow_metered_unauthenticated.checked = !!m.allow_metered_unauthenticated;
+    $('#settings-dialog').showModal();
+  }
+  $('#settings-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const f = ev.target, el = f.elements;
+    try {
+      await post(`/api/flows/${enc(f.dataset.flow)}`, {
+        queue_timeout: Number(el.queue_timeout.value) || 120,
+        background_max_lanes: el.background_max_lanes.value ? Number(el.background_max_lanes.value) : null,
+        allow_metered_unauthenticated: el.allow_metered_unauthenticated.checked,
+      }, 'PUT');
+      $('#settings-dialog').close();
+      await tick();
+    } catch (e) { formError(f, e.message); }
+  });
   $('#add-model').addEventListener('click', () => openModelDialog(null).catch((e) => banner(e.message)));
 
   // ------------------------------------------------------------- actions
@@ -624,6 +654,9 @@
         await post(`/api/endpoints/${enc(d.pause)}/pause`);
       } else if (d.resume) {
         await post(`/api/endpoints/${enc(d.resume)}/resume`);
+      } else if (d.flowSettings) {
+        await openSettingsDialog(d.flowSettings);
+        return;
       } else if (d.addMember) {
         openMemberDialog(d.addMember);
         return;

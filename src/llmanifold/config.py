@@ -38,6 +38,7 @@ class Endpoint:
     probe: str = "models"          # how to check health / busy state
     metered: bool = False          # costs money per request (remote API)
     fallback: bool = False         # only used as a fallback, never as a first choice
+    overflow_at: int | None = None # as a flow's fallback: take requests once this many are waiting for a lane
     timeout: float = 1800.0        # whole-request read timeout (s)
     connect_timeout: float = 5.0
     stream_usage: bool = True      # ask OpenAI-style engines for token counts on streams
@@ -179,6 +180,8 @@ def parse(raw: dict[str, Any], path: str | None = None) -> Config:
             raise ConfigError(f"endpoint {name!r}: probe must be one of {PROBES}")
         if ep.max_concurrency < 1:
             raise ConfigError(f"endpoint {name!r}: max_concurrency must be >= 1")
+        if ep.overflow_at is not None and (not isinstance(ep.overflow_at, int) or ep.overflow_at < 1):
+            raise ConfigError(f"endpoint {name!r}: overflow_at must be a whole number >= 1")
         cfg.endpoints[name] = ep
 
     model_keys = set(Model.__dataclass_fields__) - {"name"}

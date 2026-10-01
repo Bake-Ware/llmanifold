@@ -218,10 +218,33 @@
     <label class="check"><input type="checkbox" name="metered"> Costs money per request
       <span class="opt">anonymous callers won't fall back to it unless a flow allows that</span></label>
     <label class="check"><input type="checkbox" name="fallback"> Only use as a fallback</label>
+    <label class="field">Help clear a backlog <span class="opt">when this is a flow's fallback: take requests once this many are waiting for a lane. Blank: only when the pool fails or the longest wait runs out.</span>
+      <input name="overflow_at" type="number" min="1" step="1" placeholder="e.g. 5">
+    </label>
     <p class="form-error" hidden></p>
     <div class="dialog-actions">
       <button type="button" class="secondary" data-close>Cancel</button>
       <button type="submit" id="model-save">Add model</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="settings-dialog" class="confirm form-dialog">
+  <form id="settings-form">
+    <h2>Flow settings</h2>
+    <p class="muted small sub">for <b id="settings-flow"></b></p>
+    <label class="field">Longest wait for a lane <span class="opt">seconds; after this the request goes to the fallbacks (or fails if there are none)</span>
+      <input name="queue_timeout" type="number" min="1" step="1">
+    </label>
+    <label class="field">Background requests may use at most <span class="opt">lanes; blank for no limit</span>
+      <input name="background_max_lanes" type="number" min="1" step="1">
+    </label>
+    <label class="check"><input type="checkbox" name="allow_metered_unauthenticated"> Let callers without a token use paid fallbacks
+      <span class="opt">anyone who can reach the API could then spend money on this flow; tokens are the safer way</span></label>
+    <p class="form-error" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" data-close>Cancel</button>
+      <button type="submit">Save</button>
     </div>
   </form>
 </dialog>

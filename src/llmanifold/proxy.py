@@ -440,14 +440,22 @@ class Core:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + model.queue_timeout
         desc = f"{'streaming to' if ctx.stream else 'answering'} {ctx.client}"
-        # 1. the pool
+        # paid endpoints are only for callers allowed to spend money
+        def may_use(ep) -> bool:
+            return not (ep.metered and not ctx.authed and not model.allow_metered_unauthenticated)
+
+        overflow = [(n, self.cfg.endpoints[n].overflow_at) for n in model.fallback
+                    if n in self.cfg.endpoints and self.cfg.endpoints[n].overflow_at
+                    and may_use(self.cfg.endpoints[n])]
+        tried: set[str] = set()
+        # 1. the pool (or, when the queue backs up, an overflow fallback)
         tried_pool = 0
         while model.pool and tried_pool < max(1, len(model.pool)):
             tried_pool += 1
             t_q = time.monotonic()
             st = await self.router.acquire(model, key=ctx.key, background=ctx.background,
                                            timeout=max(0.0, deadline - loop.time()),
-                                           rid=ctx.rid, desc=desc, min_context=min_ctx)
+                                           rid=ctx.rid, desc=desc, min_context=min_ctx, overflow=overflow)
             ctx.queued += time.monotonic() - t_q
             if st is None:
                 trig = "queue" if self.router.pool_available(model, min_ctx) else "connect"
@@ -457,6 +465,17 @@ class Core:
                                                    "connect": "no healthy pool endpoint",
                                                    "context": "prompt is larger than the pool's context"}[trig])
                 ctx.attempts.append({"endpoint": "pool", "trigger": trig})
+                break
+            if st.name not in model.pool:
+                # overflow: the queue backed up, so a fallback endpoint takes this request
+                tried.add(st.name)
+                self.counters["fallbacks"] += 1
+                ctx.attempts.append({"endpoint": "pool", "trigger": "overflow"})
+                last = await self._attempt(ctx, st, responder)
+                ctx.attempts.append({"endpoint": st.name, "ok": last.ok, "trigger": last.trigger,
+                                     "status": last.status, "fallback": True})
+                if last.ok or last.committed or last.trigger == "client":
+                    return last, st
                 break
             last = await self._attempt(ctx, st, responder)
             ctx.attempts.append({"endpoint": st.name, "ok": last.ok, "trigger": last.trigger,
@@ -469,9 +488,9 @@ class Core:
         if model.fallback and (last.trigger in model.fallback_on):
             for name in model.fallback:
                 ep = self.cfg.endpoints.get(name)
-                if ep is None:
+                if ep is None or name in tried:
                     continue
-                if ep.metered and not ctx.authed and not model.allow_metered_unauthenticated:
+                if not may_use(ep):
                     ctx.attempts.append({"endpoint": name, "skipped": "metered endpoint needs a token"})
                     continue
                 st = await self.router.try_endpoint(name, background=ctx.background, rid=ctx.rid, desc=desc)

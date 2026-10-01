@@ -20,7 +20,9 @@ Anthropic API shapes on the way.
   that trigger them: `connect`, `timeout`, `slow`, `5xx`, `429`, `4xx`,
   `context`, `empty`, `queue`. Fallback only happens before any content reaches
   the client; streams are held until the first token so a failed start can be
-  retried elsewhere.
+  retried elsewhere. A fallback can also help with load: `overflow_at: 5` sends
+  requests to it once five are waiting for a lane, so the queue never grows
+  past four while it has room.
 - **Metered endpoints.** Mark paid APIs `metered: true`. Open models don't fall
   back to them for anonymous callers unless you allow it, and a webhook fires
   whenever one serves a request (so a bot can tell you).

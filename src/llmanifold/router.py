@@ -81,7 +81,7 @@ class EndpointState:
                 "max_concurrency": self.cfg.max_concurrency, "inflight": self.inflight,
                 "background_inflight": self.bg_inflight, "probe_busy": self.probe_busy,
                 "load": self.load(), "healthy": self.healthy, "draining": self.draining,
-                "metered": self.cfg.metered, "fallback": self.cfg.fallback, "context": self.cfg.context,
+                "metered": self.cfg.metered, "fallback": self.cfg.fallback, "overflow_at": self.cfg.overflow_at, "context": self.cfg.context,
                 "last_error": self.last_error, "last_ok": self.last_ok or None,
                 "requests": self.requests, "errors": self.errors, "tokens_in": self.tokens_in,
                 "tokens_out": self.tokens_out,
@@ -191,8 +191,14 @@ class Router:
                 self._affinity.popitem(last=False)
 
     async def acquire(self, model: Model, *, key: str | None, background: bool, timeout: float,
-                      rid: str = "", desc: str = "", min_context: int | None = None) -> EndpointState | None:
-        """Wait (up to `timeout`) for a pool endpoint and reserve it. None on timeout or if the pool is dead."""
+                      rid: str = "", desc: str = "", min_context: int | None = None,
+                      overflow: list[tuple[str, int]] = ()) -> EndpointState | None:
+        """Wait (up to `timeout`) for a pool endpoint and reserve it. None on timeout or if the pool is dead.
+
+        `overflow` lists (fallback endpoint, n): while waiting, a request that is n-th or later in this
+        model's queue goes to that endpoint instead, if it has room. So up to n-1 requests wait for the
+        pool and the backlog beyond that is cleared by the overflow endpoint. The caller can tell an
+        overflow by the endpoint not being in `model.pool`."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, timeout)
         w = _Waiter(1 if background else 0, next(self._seq), model.name, rid=rid)
@@ -208,6 +214,14 @@ class Router:
                         if st is not None:
                             self._reserve(st, background, key, rid, desc)
                             return st
+                    position = len(ahead) + 1
+                    for name, n in overflow:
+                        ost = self.states.get(name)
+                        if (position >= n and ost is not None and ost.usable
+                                and ost.load() < ost.cfg.max_concurrency
+                                and not (min_context and ost.cfg.context and ost.cfg.context < min_context)):
+                            self._reserve(ost, background, None, rid, desc)
+                            return ost
                     remaining = deadline - loop.time()
                     if remaining <= 0:
                         return None

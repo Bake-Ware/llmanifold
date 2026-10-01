@@ -397,3 +397,25 @@ async def test_reasoning_only_answer_is_not_empty(stack):
     r = await s.api.post("/v1/messages", json={"model": "qwen", "max_tokens": 5,
                                                  "messages": [{"role": "user", "content": "hi"}]})
     assert (await r.json())["content"][0]["type"] == "thinking"
+
+
+async def test_overflow_fallback_clears_a_backlog(stack):
+    """overflow_at=2: one request may wait for the pool; the 2nd and later in the queue go to the fallback."""
+    s = await stack({"a": {"kind": "openai", "fake": {"delay": 0.4}},
+                     "f": {"kind": "openai", "fallback": True, "overflow_at": 2, "max_concurrency": 4}},
+                    {"qwen": {"pool": ["a"], "fallback": ["f"]}})
+    rs = await asyncio.gather(*[s.api.post("/v1/chat/completions", json=chat(text=f"q{i}")) for i in range(4)])
+    assert all(r.status == 200 for r in rs)
+    assert len(s.fakes["a"].bodies) == 2 and len(s.fakes["f"].bodies) == 2
+    await asyncio.sleep(0.1)
+    over = [r for r in s.core.recent if any(a.get("trigger") == "overflow" for a in r["attempts"])]
+    assert len(over) == 2 and all(r["fallback"] for r in over)
+
+
+async def test_overflow_respects_metered_rule(stack):
+    s = await stack({"a": {"kind": "openai", "fake": {"delay": 0.3}},
+                     "f": {"kind": "openai", "fallback": True, "metered": True, "overflow_at": 1, "max_concurrency": 4}},
+                    {"qwen": {"pool": ["a"], "fallback": ["f"]}})
+    rs = await asyncio.gather(*[s.api.post("/v1/chat/completions", json=chat(text=f"q{i}")) for i in range(3)])
+    assert all(r.status == 200 for r in rs)
+    assert not s.fakes["f"].bodies                      # anonymous callers wait for the pool instead

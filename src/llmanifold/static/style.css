@@ -55,7 +55,8 @@ main { margin-left: var(--side-w); padding: 0 28px 48px; min-width: 0; }
 .section-head { display: flex; justify-content: space-between; align-items: center; margin-top: 26px; }
 .section-head h2 { margin: 0; font: 500 10px var(--mono); letter-spacing: 1px; text-transform: uppercase; color: var(--accent); }
 .section-head + .manifold { margin-top: 10px; }
-.flow-actions { display: flex; gap: 6px; margin-top: 4px; }
+.flow-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.flow-actions button { white-space: nowrap; }
 .manifold { display: flex; flex-direction: column; gap: 12px; margin-top: 18px; }
 .model-row { display: grid; grid-template-columns: minmax(150px, 220px) 90px minmax(0, 1fr); align-items: center;
   padding: 14px 16px; }

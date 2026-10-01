@@ -38,6 +38,7 @@ endpoints:
     context: 65536
     metered: true            # costs money: fires the `metered` webhook when used
     fallback: true           # never a first choice
+    overflow_at: 5           # also take requests once 5 are waiting for a lane (clears a backlog)
 
   claude:
     url: https://api.anthropic.com

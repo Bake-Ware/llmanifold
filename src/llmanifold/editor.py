@@ -31,7 +31,7 @@ KEEP_BACKUPS = 20
 
 # fields the admin site may set, in the order they're written for a new entry
 ENDPOINT_FIELDS = ("url", "dialect", "model", "max_concurrency", "context", "probe", "metered", "fallback",
-                   "timeout", "connect_timeout")
+                   "overflow_at", "timeout", "connect_timeout")
 FLOW_FIELDS = ("aliases", "pool", "fallback", "fallback_on", "auth", "allow_metered_unauthenticated",
                "queue_timeout", "first_token_timeout", "background_max_lanes", "affinity", "context",
                "input_modalities", "description")

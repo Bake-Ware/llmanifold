@@ -95,10 +95,28 @@
     if (e.probe_busy > e.inflight) return 'busy: serving a client that bypassed llmanifold';
     return 'idle';
   }
+  function balanceText(balance) {
+    if (!balance || !balance.length) return '';
+    const sym = { USD: '$', CNY: '¥' };
+    return balance.map((b) => {
+      const n = Number(b.amount), amt = Number.isFinite(n) ? n.toFixed(2) : b.amount;
+      return sym[b.currency] ? sym[b.currency] + amt : `${amt} ${b.currency}`.trim();
+    }).join(' + ') + ' left';
+  }
+  function quotaText(quota) {
+    if (!quota || !quota.length) return '';
+    const span = (s) => (s >= 6 * 86400 ? 'weekly' : s >= 86400 ? Math.round(s / 86400) + '-day'
+      : s >= 3600 ? Math.round(s / 3600) + '-hour' : s ? Math.round(s / 60) + '-minute' : '');
+    return quota.map((q) => {
+      const left = Math.max(0, 100 - Math.round(q.used_percent)), secs = q.reset_at ? q.reset_at - Date.now() / 1000 : 0;
+      const reset = secs > 0 ? `, resets in ${secs >= 172800 ? Math.round(secs / 86400) + 'd' : secs >= 3600 ? Math.round(secs / 3600) + 'h' : Math.max(1, Math.round(secs / 60)) + 'm'}` : '';
+      return `${left}% of ${span(q.window_seconds)} quota left${reset}`.replace('of  quota', 'of quota');
+    }).join(' · ');
+  }
   function laneHtml(e, flow, fallback) {
     const st = laneState(e);
     const tags = [e.metered ? 'paid' : '', fallback ? (e.overflow_at ? `fallback · helps at ${e.overflow_at} waiting` : 'fallback') : '',
-      e.dialect === 'anthropic' ? 'anthropic api' : '']
+      e.dialect === 'anthropic' ? 'anthropic api' : '', balanceText(e.balance), quotaText(e.quota)]
       .filter(Boolean).join(' · ');
     const pause = e.draining
       ? `<button class="small" data-resume="${esc(e.name)}">Resume</button>`
@@ -128,13 +146,15 @@
   }
   function renderOverview() {
     const s = status, c = s.counters;
-    const done = c.ok + c.errors;
+    const done = c.ok + c.errors, tps = s.tps || {};
     const tiles = [
       [num(c.requests), 'requests since start', ''],
       [done ? Math.round((100 * c.ok) / done) + '%' : '–', 'succeeded', 'good'],
       [num(c.fallbacks), 'fell back', ''],
       [num(c.metered), 'served by paid APIs', ''],
       [String(s.queue.length), 'waiting now', s.queue.length ? '' : 'good'],
+      [tps.current ? tps.current.toFixed(1) : '–', 'tokens/s now', ''],
+      [tps.average != null ? tps.average.toFixed(1) : '–', 'average tokens/s', ''],
     ];
     $('#tiles').innerHTML = tiles.map(([k, l, cls]) => `<div class="tile"><div class="k ${cls}">${k}</div><div class="l">${l}</div></div>`).join('');
     const byName = Object.fromEntries(s.endpoints.map((e) => [e.name, e]));

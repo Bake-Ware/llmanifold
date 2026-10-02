@@ -94,6 +94,13 @@ class FakeOpenAIAuth:
         app.router.add_post("/oauth/token", token)
         app.router.add_post("/backend-api/codex/responses", responses)
         app.router.add_get("/backend-api/codex/models", models)
+
+        async def usage(req):
+            self.headers.append(dict(req.headers))
+            return web.json_response({"plan_type": "pro", "rate_limit": {"allowed": True, "primary_window": {
+                "used_percent": 17, "limit_window_seconds": 604800, "reset_after_seconds": 90000,
+                "reset_at": 1791056930}, "secondary_window": None}})
+        app.router.add_get("/backend-api/wham/usage", usage)
         return app
 
 
@@ -132,6 +139,10 @@ async def test_device_sign_in_then_requests(stack, aiohttp_server):
     assert "token" not in json.dumps(st)                  # never shown back
     await s.core.probe(s.core.router.states["codex"])     # sign-in is its health
     assert s.core.router.states["codex"].healthy
+    await s.core.balance(s.core.router.states["codex"])   # the plan's allowance shows on the dashboard
+    eps = {e["name"]: e for e in (await (await s.admin.get("/api/status")).json())["endpoints"]}
+    assert eps["codex"]["quota"] == [{"used_percent": 17, "window_seconds": 604800, "reset_at": 1791056930}]
+    assert fake.headers[-1]["Authorization"].startswith("Bearer ") and eps["a"]["quota"] is None
 
     r = await s.api.post("/v1/chat/completions", json=chat())
     out = await r.json()

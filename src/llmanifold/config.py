@@ -17,8 +17,9 @@ import yaml
 DIALECTS = ("openai", "anthropic", "responses")   # responses: OpenAI Responses API (upstream only)
 LOGINS = ("chatgpt",)
 PROBES = ("none", "models", "strata", "llamacpp")
-TRIGGERS = ("connect", "timeout", "slow", "5xx", "429", "4xx", "context", "empty", "queue")
-DEFAULT_TRIGGERS = ("connect", "timeout", "slow", "5xx", "429", "context", "empty", "queue")
+TRIGGERS = ("connect", "timeout", "slow", "5xx", "429", "4xx", "context", "empty", "schema", "queue")
+DEFAULT_TRIGGERS = ("connect", "timeout", "slow", "5xx", "429", "context", "empty", "schema", "queue")
+JSON_SCHEMA_MODES = ("native", "emulate")
 
 
 class ConfigError(ValueError):
@@ -45,7 +46,20 @@ class Endpoint:
     timeout: float = 1800.0        # whole-request read timeout (s)
     connect_timeout: float = 5.0
     stream_usage: bool = True      # ask OpenAI-style engines for token counts on streams
+    json_schema: str | None = None # response_format json_schema: "native" passes it through; "emulate" uses JSON
+                                   # mode, checks the reply and asks again if it doesn't fit. Default: emulate for DeepSeek
     headers: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def is_deepseek(self) -> bool:
+        host = self.url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+        return host == "deepseek.com" or host.endswith(".deepseek.com")
+
+    @property
+    def emulates_json_schema(self) -> bool:
+        if self.json_schema is not None:
+            return self.json_schema == "emulate"
+        return self.is_deepseek
 
     def api_key(self) -> str | None:
         if self.key:
@@ -185,6 +199,8 @@ def parse(raw: dict[str, Any], path: str | None = None) -> Config:
             raise ConfigError(f"endpoint {name!r}: a ChatGPT sign-in needs dialect: responses")
         if ep.probe not in PROBES:
             raise ConfigError(f"endpoint {name!r}: probe must be one of {PROBES}")
+        if ep.json_schema is not None and ep.json_schema not in JSON_SCHEMA_MODES:
+            raise ConfigError(f"endpoint {name!r}: json_schema must be one of {JSON_SCHEMA_MODES}")
         if ep.max_concurrency < 1:
             raise ConfigError(f"endpoint {name!r}: max_concurrency must be >= 1")
         if ep.overflow_at is not None and (not isinstance(ep.overflow_at, int) or ep.overflow_at < 1):

@@ -39,6 +39,7 @@ endpoints:
     metered: true            # costs money: fires the `metered` webhook when used
     fallback: true           # never a first choice
     overflow_at: 5           # also take requests once 5 are waiting for a lane (clears a backlog)
+    # json_schema: emulate   # response_format json_schema via JSON mode + a checked reply (default for DeepSeek)
 
   codex:                     # a ChatGPT plan through the Codex backend; sign in from the admin site
     url: https://chatgpt.com/backend-api/codex
@@ -68,7 +69,7 @@ models:
     aliases: [default, gpt-4o]           # other names clients may use
     pool: [gpu0, gpu1]
     fallback: [deepseek]
-    fallback_on: [connect, timeout, 5xx, 429, context, empty, queue]
+    fallback_on: [connect, timeout, 5xx, 429, context, empty, schema, queue]
     queue_timeout: 120                   # wait this long for a free lane before falling back
     first_token_timeout: 300
     background_max_lanes: 1              # requests marked background may hold at most one lane

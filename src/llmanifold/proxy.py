@@ -22,6 +22,7 @@ import aiohttp
 from aiohttp import web
 
 from . import dialects as D
+from . import schema as S
 from .config import Config, Model
 from .chatgpt import ChatGPTLogins, LoginError
 from .editor import ConfigEditor
@@ -32,6 +33,9 @@ log = logging.getLogger("llmanifold")
 
 CLIENT_GONE = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
 UPSTREAM_DOWN = (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError, aiohttp.ClientOSError)
+
+BALANCE_INTERVAL = 60.0   # seconds between checks of an API's remaining credit
+LIVE_WINDOW = 5.0   # seconds of streamed tokens behind the "current" tokens-per-second figure
 
 
 def conversation_key(body: dict, dialect: str) -> str | None:
@@ -218,7 +222,26 @@ class Core:
         self.reload_error: str | None = None
         self.counters: dict[str, int] = {"requests": 0, "ok": 0, "errors": 0, "fallbacks": 0,
                                          "metered": 0, "unauthorized": 0}
+        self._live: deque[tuple[float, int]] = deque()   # (when, tokens) streamed in the last LIVE_WINDOW
+        self._gen_tokens = 0          # tokens and generation seconds of finished requests, for the average
+        self._gen_seconds = 0.0
         self._tasks: list[asyncio.Task] = []
+
+    # ---------------------------------------------------------------- throughput
+    def _streamed(self, tokens: int) -> None:
+        now = time.monotonic()
+        self._live.append((now, tokens))
+        while self._live and self._live[0][0] < now - LIVE_WINDOW:
+            self._live.popleft()
+
+    def throughput(self) -> dict:
+        """Tokens per second: `current` across everything streaming right now,
+        `average` while generating over the requests finished since start."""
+        cutoff = time.monotonic() - LIVE_WINDOW
+        while self._live and self._live[0][0] < cutoff:
+            self._live.popleft()
+        return {"current": round(sum(n for _, n in self._live) / LIVE_WINDOW, 1),
+                "average": round(self._gen_tokens / self._gen_seconds, 1) if self._gen_seconds else None}
 
     # ---------------------------------------------------------------- lifecycle
     async def start(self) -> None:
@@ -226,6 +249,7 @@ class Core:
         self.chatgpt.session = self.session
         self._tasks.append(asyncio.create_task(self._probe_loop()))
         self._tasks.append(asyncio.create_task(self._prune_loop()))
+        self._tasks.append(asyncio.create_task(self._balance_loop()))
 
     async def stop(self) -> None:
         for t in self._tasks:
@@ -366,6 +390,63 @@ class Core:
             except Exception:
                 log.exception("probe loop")
             await asyncio.sleep(2.0)
+
+    async def balance(self, st: EndpointState) -> None:
+        """What is left to spend, for APIs that report it: prepaid credit (DeepSeek: GET /user/balance)
+        or the share of a ChatGPT plan's allowance already used."""
+        ep = st.cfg
+        if ep.login == "chatgpt" and "/backend-api/" in ep.url:
+            st.balance = None
+            await self._chatgpt_quota(st)
+            return
+        st.quota = None
+        key = ep.api_key()
+        if not (ep.is_deepseek and key):
+            st.balance = None
+            return
+        scheme, _, rest = ep.url.partition("://")
+        url = f"{scheme}://{rest.split('/', 1)[0]}/user/balance"
+        try:
+            async with self.session.get(url, headers={"Authorization": f"Bearer {key}", **ep.headers},
+                                        timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    return
+                infos = (await r.json(content_type=None)).get("balance_infos") or []
+            st.balance = [{"amount": str(i.get("total_balance")), "currency": str(i.get("currency") or "")}
+                          for i in infos if i.get("total_balance") is not None]
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, AttributeError):
+            pass     # keep the last figure
+
+    async def _chatgpt_quota(self, st: EndpointState) -> None:
+        """How much of the ChatGPT plan's Codex allowance is used, per rate-limit window."""
+        ep = st.cfg
+        url = ep.url.split("/backend-api/", 1)[0] + "/backend-api/wham/usage"
+        try:
+            headers = await self.chatgpt.headers(ep.name)
+            async with self.session.get(url, headers={**headers, "originator": "llmanifold", **ep.headers},
+                                        timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    return
+                limit = (await r.json(content_type=None)).get("rate_limit") or {}
+            st.quota = [{"used_percent": w.get("used_percent"), "window_seconds": w.get("limit_window_seconds"),
+                         "reset_at": w.get("reset_at")}
+                        for w in (limit.get("primary_window"), limit.get("secondary_window"))
+                        if isinstance(w, dict) and w.get("used_percent") is not None]
+        except LoginError:
+            st.quota = None
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, AttributeError):
+            pass     # keep the last figure
+
+    async def _balance_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.gather(*(self.balance(st) for st in list(self.router.states.values())),
+                                     return_exceptions=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("balance loop")
+            await asyncio.sleep(BALANCE_INTERVAL)
 
     async def _prune_loop(self) -> None:
         while True:
@@ -588,6 +669,9 @@ class Core:
                 if beta and ctx.dialect == "anthropic":
                     headers["anthropic-beta"] = beta
             headers.update(ep.headers)
+            want = S.wanted(up) if ep.dialect == "openai" and ep.emulates_json_schema else None
+            if want is not None:
+                return await self._attempt_schema(ctx, st, responder, ep.url + path, up, headers, want)
             return await self._call(ctx, st, responder, ep.url + path, up, headers)
         finally:
             await self.router.release(st, ctx.background, ctx.rid)
@@ -616,8 +700,71 @@ class Core:
                 return out
         return out
 
+    async def _attempt_schema(self, ctx: Ctx, st: EndpointState, responder: Responder, url: str, up: dict,
+                              headers: dict, want: dict) -> Outcome:
+        """`response_format: json_schema` on an endpoint that only has JSON mode: ask for a JSON
+        object with the schema in the prompt, check the reply, and send a reply that doesn't fit
+        back to the model with what was wrong. Nothing reaches the client until a reply fits."""
+        up = S.emulated_request(up, want)
+        tokens_in = tokens_out = 0
+        ttft = None
+        errors: list[str] = []
+        for _ in range(S.MAX_ROUNDS):
+            got: dict = {}
+            out = await self._call(ctx, st, responder, url, up, headers, capture=got)
+            if not out.ok:
+                return out
+            tokens_in += out.tokens_in
+            tokens_out += out.tokens_out
+            ttft = out.ttft if ttft is None else ttft
+            data = got["data"]
+            msg = data["choices"][0]["message"]
+            errors = [] if msg.get("tool_calls") else S.check(msg.get("content"), want)
+            if not errors:
+                data["usage"] = {"prompt_tokens": tokens_in, "completion_tokens": tokens_out,
+                                 "total_tokens": tokens_in + tokens_out}
+                await self._deliver(ctx, st, responder, data)
+                st.served()
+                return Outcome(True, status=200, tokens_in=tokens_in, tokens_out=tokens_out, ttft=ttft,
+                               committed=True)
+            if data["choices"][0].get("finish_reason") == "length":
+                # cut off by max_tokens (often spent on reasoning): asking again would end the same way
+                return Outcome(False, "schema", 200, "reply was cut off by max_tokens before it fit the JSON schema")
+            log.info("%s: reply did not fit the schema (%s); asking again", st.name, errors[0])
+            up = dict(up)
+            up["messages"] = up["messages"] + (
+                [{"role": "assistant", "content": msg["content"]}] if msg.get("content") else []
+            ) + [{"role": "user", "content": S.followup(want, errors)}]
+        return Outcome(False, "schema", 200, f"reply did not fit the JSON schema after {S.MAX_ROUNDS} tries: "
+                                             + "; ".join(errors[:3]))
+
+    async def _deliver(self, ctx: Ctx, st: EndpointState, responder: Responder, data: dict) -> None:
+        """Send a gathered chat.completion to the client, as JSON or as a (short) stream."""
+        if not ctx.stream:
+            await responder.send_json(200, D.translate_response(data, "openai", ctx.dialect, ctx.requested), st.name)
+            return
+        msg, base = data["choices"][0]["message"], {"id": data["id"], "object": "chat.completion.chunk",
+                                                    "created": data["created"], "model": ctx.requested}
+        delta = {"role": "assistant", "content": msg.get("content") or ""}
+        if msg.get("tool_calls"):
+            delta["tool_calls"] = [{"index": i, **tc} for i, tc in enumerate(msg["tool_calls"])]
+        chunks = [D.sse({**base, "choices": [{"index": 0, "delta": delta}]}),
+                  D.sse({**base, "choices": [{"index": 0, "delta": {},
+                                              "finish_reason": data["choices"][0]["finish_reason"]}]}),
+                  D.sse({**base, "choices": [], "usage": data["usage"]}), b"data: [DONE]\n\n"]
+        tr = D.stream_translator("openai", ctx.dialect, ctx.requested, include_usage=ctx.include_usage,
+                                 rename=True, strip_usage=not ctx.include_usage)
+        outs: list[bytes] = []
+        for ev in D.SSEParser().feed(b"".join(chunks)):
+            outs += tr.feed(*ev)
+        outs += tr.finish()
+        await responder.start_stream(st.name)
+        await responder.write(b"".join(outs))
+        await responder.end()
+
     async def _call(self, ctx: Ctx, st: EndpointState, responder: Responder, url: str, up: dict,
-                    headers: dict) -> Outcome:
+                    headers: dict, capture: dict | None = None) -> Outcome:
+        """`capture`: gather the reply into capture["data"] instead of sending it to the client."""
         ep = st.cfg
         t0 = time.monotonic()
         content_started = False
@@ -630,7 +777,7 @@ class Core:
                     if trig == "5xx":
                         st.mark_failure(f"HTTP {resp.status}")
                     return Outcome(False, trig, resp.status, text[:2000])
-                collect = not ctx.stream   # upstream always streams; non-streaming clients get it gathered up
+                collect = capture is not None or not ctx.stream   # upstream always streams; non-streaming clients get it gathered up
                 # streaming: hold until real content, so a fast failure can still fall back
                 if collect:
                     tr = D.stream_translator(ep.dialect, "openai", ctx.requested, include_usage=True)
@@ -642,6 +789,7 @@ class Core:
                 held: list[bytes] = []
                 first_deadline = t0 + (ep.first_token_timeout or ctx.model.first_token_timeout)
                 ttft = None
+                seen = 0
                 it = resp.content.iter_any().__aiter__()
                 while True:
                     wait = None if content_started else first_deadline - time.monotonic()
@@ -658,6 +806,9 @@ class Core:
                     outs: list[bytes] = []
                     for ev in parser.feed(chunk):
                         outs += tr.feed(*ev)
+                    if tr.deltas > seen:
+                        self._streamed(tr.deltas - seen)
+                        seen = tr.deltas
                     if not content_started:
                         if tr.error:
                             return Outcome(False, "5xx", 200, f"upstream stream error: {tr.error}")
@@ -682,6 +833,11 @@ class Core:
                     if not tr.has_content:
                         return Outcome(False, "empty", 200, "upstream stream ended without content")
                     data = D.collect_openai_chunks(held, ctx.requested)
+                    if capture is not None:
+                        capture["data"] = data
+                        st.mark_ok()
+                        st.observe(tr.tokens_in, tr.tokens_out, time.monotonic() - t0 - (ttft or 0), ttft)
+                        return Outcome(True, status=200, tokens_in=tr.tokens_in, tokens_out=tr.tokens_out, ttft=ttft)
                     out = D.translate_response(data, "openai", ctx.dialect, ctx.requested)
                     await responder.send_json(200, out, st.name)
                     st.mark_ok()
@@ -732,7 +888,10 @@ class Core:
         fallback = any(a.get("fallback") for a in ctx.attempts)
         tps = None
         if ok and outcome.tokens_out and duration - (outcome.ttft or 0) > 0.2:
-            tps = round(outcome.tokens_out / max(0.001, duration - ctx.queued - (outcome.ttft or 0)), 1)
+            gen = max(0.001, duration - ctx.queued - (outcome.ttft or 0))
+            tps = round(outcome.tokens_out / gen, 1)
+            self._gen_tokens += outcome.tokens_out
+            self._gen_seconds += gen
         row = {"id": ctx.rid, "ts": time.time(), "model": ctx.model.name, "endpoint": served.name if served else None,
                "client": ctx.client, "priority": "background" if ctx.background else "interactive",
                "dialect_in": ctx.dialect, "dialect_out": served.cfg.dialect if served else None,

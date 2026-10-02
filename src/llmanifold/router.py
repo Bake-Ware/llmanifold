@@ -43,6 +43,8 @@ class EndpointState:
     current: dict = field(default_factory=dict)   # request id -> short description
     cooldown_until: float = 0.0    # monotonic; skipped until then (stalled remote API)
     probation: bool = False        # after a stall: one request at a time until one succeeds
+    balance: list | None = None    # prepaid credit left, where the API reports it: [{"amount", "currency"}]
+    quota: list | None = None      # plan allowance used: [{"used_percent", "window_seconds", "reset_at"}]
 
     @property
     def capacity(self) -> int:
@@ -111,6 +113,7 @@ class EndpointState:
                 "tokens_out": self.tokens_out,
                 "tps": round(self.tps_ema, 1) if self.tps_ema else None,
                 "ttft": round(self.ttft_ema, 2) if self.ttft_ema else None,
+                "balance": self.balance, "quota": self.quota,
                 "current": list(self.current.values())}
 
 

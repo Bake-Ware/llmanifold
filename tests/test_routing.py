@@ -490,3 +490,13 @@ async def test_probation_lets_one_request_through_until_one_succeeds(stack):
     a = s.core.router.states["a"]
     a.mark_slow("long prompt")
     assert a.usable and not a.probation
+
+
+async def test_status_reports_tokens_per_second(stack):
+    s = await stack({"a": {"kind": "openai"}}, {"qwen": {"pool": ["a"]}})
+    st = await (await s.admin.get("/api/status")).json()
+    assert st["tps"] == {"current": 0.0, "average": None}
+    r = await s.api.post("/v1/chat/completions", json=chat(stream=True))
+    await r.read()
+    st = await (await s.admin.get("/api/status")).json()
+    assert st["tps"]["current"] > 0          # tokens streamed within the live window

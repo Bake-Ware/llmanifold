@@ -20,6 +20,7 @@ from llmanifold.store import Store
 class FakeState:
     mode: str = "ok"            # ok | 500 | 429 | context | badreq | empty | stream_error | midfail | think | stall
     text: str = "hello from fake"
+    texts: list = field(default_factory=list)   # replies for successive requests, before falling back to `text`
     tool: bool = False
     delay: float = 0.0          # before the first byte
     chunk_delay: float = 0.0
@@ -53,7 +54,7 @@ def fake_openai(state: FakeState) -> web.Application:
                                          status=400)
             if m == "badreq":
                 return web.json_response({"error": {"message": "temperature must be <= 2"}}, status=400)
-            text = "" if m in ("empty", "stream_error", "think") else state.text
+            text = "" if m in ("empty", "stream_error", "think") else (state.texts.pop(0) if state.texts else state.text)
             if m == "think":   # a reasoning model that spent its whole budget thinking
                 thought = "let me think about this"
                 if not body.get("stream"):

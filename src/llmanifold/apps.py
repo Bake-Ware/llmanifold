@@ -258,6 +258,7 @@ async def a_status(request: web.Request) -> web.Response:
     return web.json_response({
         "version": __version__, "uptime": int(time.time() - core.started), "config": core.cfg.path,
         "reload_error": core.reload_error, "counters": core.counters,
+        "tps": core.throughput(),
         "endpoints": [s.snapshot() for s in core.router.states.values()],
         "models": model_rows(core), "queue": core.router.queue(), "who": request["who"],
         "listen": {"api": core.cfg.api_listen, "admin": core.cfg.admin_listen},

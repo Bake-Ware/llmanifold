@@ -233,3 +233,15 @@ def test_import_rejects_junk(tmp_path):
             raise AssertionError("accepted junk")
         except Exception as e:
             assert "JSON" in str(e) or "refresh_token" in str(e)
+
+
+async def test_endpoint_default_reasoning_effort_and_service_tier(stack, aiohttp_server):
+    s, fake, base = await _setup(stack, aiohttp_server)
+    lg = s.core.chatgpt
+    lg._save("codex", {"access_token": "at", "refresh_token": "rt", "expires_at": 9e12})
+    ep = s.core.cfg.endpoints["codex"]
+    ep.reasoning_effort, ep.service_tier = "none", "priority"
+    assert (await s.api.post("/v1/chat/completions", json=chat())).status == 200
+    assert fake.bodies[-1]["reasoning"]["effort"] == "none" and fake.bodies[-1]["service_tier"] == "priority"
+    assert (await s.api.post("/v1/chat/completions", json=chat(reasoning_effort="high"))).status == 200
+    assert fake.bodies[-1]["reasoning"]["effort"] == "high"          # the client's own choice wins

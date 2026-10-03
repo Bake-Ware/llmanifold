@@ -26,7 +26,7 @@ from . import schema as S
 from .config import Config, Model
 from .chatgpt import ChatGPTLogins, LoginError
 from .editor import ConfigEditor
-from .router import EndpointState, Router
+from .router import LIVE_WINDOW, EndpointState, Router
 from .store import Store
 
 log = logging.getLogger("llmanifold")
@@ -35,7 +35,6 @@ CLIENT_GONE = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
 UPSTREAM_DOWN = (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError, aiohttp.ClientOSError)
 
 BALANCE_INTERVAL = 60.0   # seconds between checks of an API's remaining credit
-LIVE_WINDOW = 5.0   # seconds of streamed tokens behind the "current" tokens-per-second figure
 
 
 def conversation_key(body: dict, dialect: str) -> str | None:
@@ -647,6 +646,14 @@ class Core:
         try:
             up = D.translate_request(ctx.body, ctx.dialect, ep.dialect)
             up["model"] = ep.model or ctx.model.name
+            if ep.reasoning_effort and ep.dialect != "anthropic":
+                # the endpoint's default thinking level, unless the client asked for one
+                if ep.dialect == "responses":
+                    up.setdefault("reasoning", {}).setdefault("effort", ep.reasoning_effort)
+                else:
+                    up.setdefault("reasoning_effort", ep.reasoning_effort)
+            if ep.service_tier and ep.dialect != "anthropic":
+                up["service_tier"] = ep.service_tier
             if ep.dialect == "responses":
                 return await self._attempt_responses(ctx, st, responder, up)
             # always stream from upstream, even for clients that didn't ask: only a stream shows when the
@@ -808,6 +815,7 @@ class Core:
                         outs += tr.feed(*ev)
                     if tr.deltas > seen:
                         self._streamed(tr.deltas - seen)
+                        st.streamed(tr.deltas - seen)
                         seen = tr.deltas
                     if not content_started:
                         if tr.error:

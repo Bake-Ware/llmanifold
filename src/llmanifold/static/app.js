@@ -116,19 +116,23 @@
   function laneHtml(e, flow, fallback) {
     const st = laneState(e);
     const tags = [e.metered ? 'paid' : '', fallback ? (e.overflow_at ? `fallback · helps at ${e.overflow_at} waiting` : 'fallback') : '',
-      e.dialect === 'anthropic' ? 'anthropic api' : '', balanceText(e.balance), quotaText(e.quota)]
+      e.dialect === 'anthropic' ? 'anthropic api' : '']
       .filter(Boolean).join(' · ');
     const pause = e.draining
       ? `<button class="small" data-resume="${esc(e.name)}">Resume</button>`
       : `<button class="small secondary" data-pause="${esc(e.name)}">Pause</button>`;
+    const left = [balanceText(e.balance), quotaText(e.quota)].filter(Boolean).join(' · ');
+    const settings = `<button class="small secondary edit-only" data-edit-model="${esc(e.name)}">Settings</button>`;
     const remove = `<button class="small icon edit-only" data-remove-member="${esc(e.name)}" data-flow="${esc(flow)}"
       aria-label="Remove ${esc(e.name)} from ${esc(flow)}" title="Remove from this flow">✕</button>`;
     return `<div class="lane ${st} ${fallback ? 'fallback' : ''}" data-lane="${esc(e.name)}">
       <span class="st" title="${st}"></span>
-      <span class="ln">${esc(e.name)}<small>${esc(tags || `${e.inflight}/${e.max_concurrency} in use`)}</small></span>
+      <span class="ln">${esc(e.name)}${left ? `<em class="left">${esc(left)}</em>` : ''}<small>${esc(tags || `${e.inflight}/${e.max_concurrency} in use`)}</small></span>
       <span class="now" title="${esc(laneNow(e, st))}">${esc(laneNow(e, st))}</span>
-      <span class="speed">${e.tps ? e.tps + ' t/s' : '–'}<small>${e.ttft ? 'first ' + e.ttft + 's' : num(e.requests) + ' served'}</small></span>
-      <span class="lane-act">${pause}${remove}</span></div>`;
+      ${e.inflight > 1 && e.tps_now
+    ? `<span class="speed" title="All ${e.inflight} requests running on this model, added together${e.tps ? `; about ${e.tps} t/s each` : ''}">${e.tps_now.toFixed(1)} t/s<small>total of ${e.inflight}</small></span>`
+    : `<span class="speed">${e.tps ? e.tps + ' t/s' : '–'}<small>${e.ttft ? 'first ' + e.ttft + 's' : num(e.requests) + ' served'}</small></span>`}
+      <span class="lane-act">${pause}${settings}${remove}</span></div>`;
   }
   function drawPipes(row) {
     const cell = $('.pipes-cell', row), svg = $('svg.pipes', row), lanes = $('.lanes', row), intake = $('.intake', row);
@@ -509,7 +513,7 @@
   let editing = null;
   function fillModelForm(v) {
     const f = $('#model-form');
-    for (const k of ['name', 'url', 'dialect', 'login', 'model', 'max_concurrency', 'context', 'probe', 'overflow_at', 'first_token_timeout']) {
+    for (const k of ['name', 'url', 'dialect', 'login', 'model', 'max_concurrency', 'context', 'probe', 'overflow_at', 'first_token_timeout', 'reasoning_effort', 'service_tier']) {
       if (k in v) f.elements[k].value = v[k] ?? '';
     }
     for (const k of ['metered', 'fallback']) if (k in v) f.elements[k].checked = !!v[k];
@@ -530,7 +534,7 @@
     f.reset();
     formError(f, '');
     $('#test-result').textContent = '';
-    $('#upstream-models').innerHTML = '';
+    offerModels([]);
     editing = name || null;
     $('#model-title').textContent = name ? `Edit ${name}` : 'Add a model';
     $('#model-save').textContent = name ? 'Save changes' : 'Add model';
@@ -541,17 +545,32 @@
       cfg = await api('/api/config');
       const sp = cfg.endpoints[name];
       fillModelForm({ name, ...sp, context: sp.context || '', overflow_at: sp.overflow_at || '', login: sp.login || '',
-        first_token_timeout: sp.first_token_timeout || '' });
+        first_token_timeout: sp.first_token_timeout || '', reasoning_effort: sp.reasoning_effort || '',
+        service_tier: sp.service_tier || '' });
       f.elements.key.placeholder = sp.key_set ? 'saved; leave blank to keep it' : 'sk-…';
       $('.clear-key', f).hidden = sp.key !== 'file';
     } else {
-      fillModelForm({ overflow_at: '', login: '', first_token_timeout: '', ...PRESETS.local });
+      fillModelForm({ overflow_at: '', login: '', first_token_timeout: '', reasoning_effort: '', service_tier: '', ...PRESETS.local });
       f.elements.key.placeholder = 'sk-…';
     }
     $('#model-dialog').showModal();
+    if (name) {   // a saved model: list what its API offers straight away, so the name can be picked
+      post('/api/test-endpoint', { url: f.elements.url.value, dialect: f.elements.dialect.value, key: '', name,
+        login: f.elements.login.value || null })
+        .then((r) => { if (r.ok && editing === name) offerModels(r.models); }).catch(() => {});
+    }
   }
+  function offerModels(models) {
+    const pick = $('#model-pick'), cur = $('#model-form').elements.model.value;
+    pick.hidden = !models.length;
+    pick.innerHTML = '<option value="">Pick from the models this API offers…</option>'
+      + models.map((m) => `<option value="${esc(m)}" ${m === cur ? 'selected' : ''}>${esc(m)}</option>`).join('');
+  }
+  $('#model-pick').addEventListener('change', (ev) => {
+    if (ev.target.value) $('#model-form').elements.model.value = ev.target.value;
+  });
   $('#model-form').elements.preset.addEventListener('change', (ev) => {
-    if (!editing) fillModelForm({ context: '', overflow_at: '', login: '', first_token_timeout: '', ...PRESETS[ev.target.value] });
+    if (!editing) fillModelForm({ context: '', overflow_at: '', login: '', first_token_timeout: '', reasoning_effort: '', service_tier: '', ...PRESETS[ev.target.value] });
   });
   $('#test-model').addEventListener('click', async () => {
     const f = $('#model-form'), out = $('#test-result');
@@ -563,7 +582,7 @@
       if (r.ok) {
         out.className = 'small ok';
         out.textContent = `Connected in ${r.ms} ms. ${r.models.length ? `It offers ${r.models.length} model${r.models.length === 1 ? '' : 's'}; pick one below.` : 'It didn’t list any models.'}`;
-        $('#upstream-models').innerHTML = r.models.map((m) => `<option value="${esc(m)}"></option>`).join('');
+        offerModels(r.models);
         if (!f.elements.model.value && r.models.length === 1) f.elements.model.value = r.models[0];
       } else {
         out.className = 'small bad';
@@ -581,6 +600,7 @@
       overflow_at: el.overflow_at.value ? Number(el.overflow_at.value) : null,
       login: el.login.value || null,
       first_token_timeout: el.first_token_timeout.value ? Number(el.first_token_timeout.value) : null,
+      reasoning_effort: el.reasoning_effort.value || null, service_tier: el.service_tier.value.trim() || null,
     };
     if (el.key.value.trim()) body.key = el.key.value.trim();
     if (editing && el.clear_key.checked) body.clear_key = true;

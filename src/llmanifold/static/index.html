@@ -208,8 +208,8 @@
     </div>
     <div class="row2">
       <label class="field">Model name to ask for <span class="opt">blank: pass the client's through</span>
-        <input name="model" list="upstream-models" placeholder="deepseek-chat">
-        <datalist id="upstream-models"></datalist>
+        <input name="model" placeholder="deepseek-chat">
+        <select id="model-pick" aria-label="Pick one of the models this API offers" hidden></select>
       </label>
       <label class="field">Requests at once
         <input name="max_concurrency" type="number" min="1" max="256" value="1">
@@ -231,6 +231,23 @@
     <label class="check"><input type="checkbox" name="metered"> Costs money per request
       <span class="opt">anonymous callers won't fall back to it unless a flow allows that</span></label>
     <label class="check"><input type="checkbox" name="fallback"> Only use as a fallback</label>
+    <div class="row2">
+      <label class="field">Thinking <span class="opt">used when the client doesn't ask for a level</span>
+        <select name="reasoning_effort">
+          <option value="">The API's default</option>
+          <option value="none">Off (fastest)</option>
+          <option value="minimal">Minimal</option>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+          <option value="xhigh">Extra high</option>
+          <option value="max">Maximum</option>
+        </select>
+      </label>
+      <label class="field">Service tier <span class="opt">optional; e.g. priority (Codex: faster, uses more of the plan)</span>
+        <input name="service_tier" placeholder="the API's default">
+      </label>
+    </div>
     <label class="field">Give up if nothing arrives within <span class="opt">seconds; then the flow falls back. Blank: the flow's setting (5 minutes)</span>
       <input name="first_token_timeout" type="number" min="1" step="1" placeholder="e.g. 30">
     </label>

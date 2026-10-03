@@ -20,6 +20,7 @@ PROBES = ("none", "models", "strata", "llamacpp")
 TRIGGERS = ("connect", "timeout", "slow", "5xx", "429", "4xx", "context", "empty", "schema", "queue")
 DEFAULT_TRIGGERS = ("connect", "timeout", "slow", "5xx", "429", "context", "empty", "schema", "queue")
 JSON_SCHEMA_MODES = ("native", "emulate")
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
 class ConfigError(ValueError):
@@ -46,6 +47,8 @@ class Endpoint:
     timeout: float = 1800.0        # whole-request read timeout (s)
     connect_timeout: float = 5.0
     stream_usage: bool = True      # ask OpenAI-style engines for token counts on streams
+    reasoning_effort: str | None = None  # sent when the client names none: none | minimal | low | medium | high | ...
+    service_tier: str | None = None      # sent upstream as service_tier (e.g. "priority" on the Codex backend)
     json_schema: str | None = None # response_format json_schema: "native" passes it through; "emulate" uses JSON
                                    # mode, checks the reply and asks again if it doesn't fit. Default: emulate for DeepSeek
     headers: dict[str, str] = field(default_factory=dict)
@@ -199,6 +202,8 @@ def parse(raw: dict[str, Any], path: str | None = None) -> Config:
             raise ConfigError(f"endpoint {name!r}: a ChatGPT sign-in needs dialect: responses")
         if ep.probe not in PROBES:
             raise ConfigError(f"endpoint {name!r}: probe must be one of {PROBES}")
+        if ep.reasoning_effort is not None and ep.reasoning_effort not in REASONING_EFFORTS:
+            raise ConfigError(f"endpoint {name!r}: reasoning_effort must be one of {REASONING_EFFORTS}")
         if ep.json_schema is not None and ep.json_schema not in JSON_SCHEMA_MODES:
             raise ConfigError(f"endpoint {name!r}: json_schema must be one of {JSON_SCHEMA_MODES}")
         if ep.max_concurrency < 1:

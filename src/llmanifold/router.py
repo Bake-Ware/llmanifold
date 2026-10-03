@@ -11,12 +11,13 @@ from __future__ import annotations
 import asyncio
 import itertools
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 
 from .config import Config, Endpoint, Model
 
 AFFINITY_MAX = 2048
+LIVE_WINDOW = 5.0    # seconds of streamed tokens behind an endpoint's live tokens-per-second figure
 BUSY_FRESH = 4.0     # seconds a probed busy flag stays trustworthy
 SLOW_COOLDOWN = 60.0 # a remote API that stalled is skipped this long, then gets one request at a time
 
@@ -44,6 +45,7 @@ class EndpointState:
     cooldown_until: float = 0.0    # monotonic; skipped until then (stalled remote API)
     probation: bool = False        # after a stall: one request at a time until one succeeds
     balance: list | None = None    # prepaid credit left, where the API reports it: [{"amount", "currency"}]
+    live: deque = field(default_factory=deque)   # (when, tokens) streamed in the last LIVE_WINDOW seconds
     quota: list | None = None      # plan allowance used: [{"used_percent", "window_seconds", "reset_at"}]
 
     @property
@@ -59,6 +61,19 @@ class EndpointState:
         if self.cfg.fallback or self.cfg.metered:
             self.cooldown_until = time.monotonic() + SLOW_COOLDOWN
             self.probation = True
+
+    def streamed(self, tokens: int) -> None:
+        now = time.monotonic()
+        self.live.append((now, tokens))
+        while self.live and self.live[0][0] < now - LIVE_WINDOW:
+            self.live.popleft()
+
+    def tps_now(self) -> float:
+        """Tokens per second across everything this endpoint is streaming right now."""
+        cutoff = time.monotonic() - LIVE_WINDOW
+        while self.live and self.live[0][0] < cutoff:
+            self.live.popleft()
+        return round(sum(n for _, n in self.live) / LIVE_WINDOW, 1)
 
     def served(self) -> None:
         """A real request got an answer."""
@@ -111,7 +126,7 @@ class EndpointState:
                 "last_error": self.last_error, "last_ok": self.last_ok or None,
                 "requests": self.requests, "errors": self.errors, "tokens_in": self.tokens_in,
                 "tokens_out": self.tokens_out,
-                "tps": round(self.tps_ema, 1) if self.tps_ema else None,
+                "tps": round(self.tps_ema, 1) if self.tps_ema else None, "tps_now": self.tps_now(),
                 "ttft": round(self.ttft_ema, 2) if self.ttft_ema else None,
                 "balance": self.balance, "quota": self.quota,
                 "current": list(self.current.values())}

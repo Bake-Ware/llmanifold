@@ -500,3 +500,4 @@ async def test_status_reports_tokens_per_second(stack):
     await r.read()
     st = await (await s.admin.get("/api/status")).json()
     assert st["tps"]["current"] > 0          # tokens streamed within the live window
+    assert st["endpoints"][0]["tps_now"] > 0  # and per endpoint: what a lane running several requests shows

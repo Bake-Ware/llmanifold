@@ -673,7 +673,7 @@ def stream_translator(src: str, dst: str, model: str | None, include_usage: bool
 # llmanifold; their OpenAI-chat or Anthropic requests are translated (via the chat shape) and the
 # event stream comes back as chat chunks.
 
-REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
 
 

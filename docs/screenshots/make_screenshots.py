@@ -148,7 +148,7 @@ async def build(tmp: Path):
             "small-fast": {"aliases": ["bulk"], "pool": ["gpu2"], "auth": "open"},
             "sonnet": {"pool": ["claude"], "auth": "token"},
         },
-        "admin": {"allow_from": ["127.0.0.0/8"], "local_humans": True},
+        "admin": {"allow_from": ["127.0.0.0/8"]},
     }
     (tmp / "data").mkdir()
     path = tmp / "config.yaml"
@@ -238,6 +238,14 @@ async def screenshots(browser, admin: str, out: Path) -> None:
     await page.set_viewport_size({"width": 1440, "height": 960})
     await page.wait_for_timeout(300)
     await shot(page, "add-model.png")
+    await page.keyboard.press("Escape")
+
+    await page.click('a[data-view="overview"]')
+    await page.click('button[data-flow-settings="local-large"]')
+    await page.wait_for_selector("#settings-dialog[open]")
+    await page.fill('#settings-form input[name="name"]', "local-xl")     # mid-rename, so the keep-old-name option shows
+    await page.wait_for_timeout(400)
+    await shot(page, "flow-settings.png")
     await ctx.close()
 
     ctx, page = await page_at(390, 800, scale=2)
@@ -334,7 +342,7 @@ async def main() -> None:
         store.close()
         shutil.rmtree(tmp, ignore_errors=True)
     for f in sorted(out.iterdir()):
-        print(f"{f.relative_to(ROOT)}  {f.stat().st_size // 1024} KB")
+        print(f"{f.resolve().relative_to(ROOT) if f.resolve().is_relative_to(ROOT) else f}  {f.stat().st_size // 1024} KB")
 
 
 if __name__ == "__main__":

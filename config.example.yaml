@@ -40,12 +40,14 @@ endpoints:
     fallback: true           # never a first choice
     overflow_at: 5           # also take requests once 5 are waiting for a lane (clears a backlog)
     # json_schema: emulate   # response_format json_schema via JSON mode + a checked reply (default for DeepSeek)
+    # reasoning_effort: low  # thinking level when the client names none: none minimal low medium high xhigh max
 
   codex:                     # a ChatGPT plan through the Codex backend; sign in from the admin site
     url: https://chatgpt.com/backend-api/codex
     dialect: responses
     login: chatgpt
     model: gpt-5.5
+    # service_tier: priority # passed upstream as service_tier
     max_concurrency: 4
     probe: none
     metered: true

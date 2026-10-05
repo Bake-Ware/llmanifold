@@ -128,25 +128,42 @@ either kind of upstream.
   can be limited to N lanes per model.
 - **Tokens per model.** A model is `open` or needs a token. Tokens are created,
   scoped and revoked in the admin site.
+- **Per-endpoint request defaults.** `reasoning_effort` sets an endpoint's
+  thinking level when the client doesn't name one (`none` through `max`), and
+  `service_tier` is passed upstream (e.g. `priority` on the Codex backend).
 - **Dashboard.** Live alias flows and lanes, charts of traffic, speed and
   time to first token (SQLite history, 30 days by default), and token
-  management, on a separate admin listener. From the admin site you can add, edit, pause and remove models (including paid APIs, with a
-  connection test) and build alias flows (rename them, give them aliases, pick the default); changes are written back to the YAML
-  file with comments kept, and API keys go to files only llmanifold can read.
-  Prometheus metrics at `/metrics`.
+  management, on a separate admin listener. From the admin site you can add,
+  edit, pause and remove models (including paid APIs, with a connection test)
+  and build alias flows: rename them, give them aliases, pick the default.
+  Changes are written back to the YAML file with comments kept, and API keys
+  go to files only llmanifold can read. Prometheus metrics at `/metrics`.
 - **Proxy-friendly.** Keepalives (SSE comments, or leading whitespace on JSON)
   stop proxies like Cloudflare from cutting long generations at ~100 s.
 
 ## The dashboard
 
 The admin listener serves a dashboard that shows what llmanifold is doing and
-lets a signed-in person change it. It is separate from the API listener, so you
-can keep it private.
+lets you change it. It is separate from the API listener, so you can keep it
+private (see [Admin access](#admin-access)).
 
 **Overview** draws each alias flow as a manifold: the name clients ask for on the
-left, a pipe to every lane that can serve it on the right. Busy pipes run amber,
-fallbacks are dashed, and anything waiting for a lane is listed underneath. Pause
-a model from here and it finishes what it has and takes nothing new.
+left, a pipe to every lane that can serve it on the right. Each lane is labelled
+with the engine and the model name it is asked for, as in `gpu0 (local-large)`;
+an engine with no `model` set is sent the name the client used. Busy pipes run
+amber, fallbacks are dashed, and anything waiting for a lane is listed
+underneath. Pause a model from here and it finishes what it has and takes
+nothing new.
+
+A flow's **Settings** rename it, change the other names it answers to, and make
+it the default flow (the one that gets requests naming no model, or a model
+llmanifold doesn't know). A rename moves everything with the flow: its place in
+the config, its open/token setting and the tokens scoped to it. The old name
+can stay on as an alias, so clients still using it keep working.
+
+<p align="center">
+  <img src="docs/img/flow-settings.png" alt="Flow settings dialog: name, aliases, default flow and queue limits, mid-rename" width="78%">
+</p>
 
 **Requests** charts traffic by the model that answered, output speed, and time to
 first token (typical and 95th percentile) over the last hour, six hours, day or
@@ -222,7 +239,8 @@ API keys come from `key_env` or `key_file`; avoid literal `key:` values.
 
 Set `default_model` to route requests that name no model, or one llmanifold
 doesn't know, instead of answering 404 (handy when replacing a single-model
-server whose clients send whatever name they were configured with).
+server whose clients send whatever name they were configured with). The
+"Default flow" checkbox in a flow's Settings sets it from the dashboard.
 
 ### Probes
 

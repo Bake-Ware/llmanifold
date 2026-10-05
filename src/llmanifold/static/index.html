@@ -283,6 +283,16 @@
   <form id="settings-form">
     <h2>Flow settings</h2>
     <p class="muted small sub">for <b id="settings-flow"></b></p>
+    <label class="field">Name <span class="opt">what clients ask for</span>
+      <input name="name" required autocomplete="off" spellcheck="false">
+    </label>
+    <label class="check" id="keep-old-name" hidden><input type="checkbox" name="keep_old" checked> Keep answering to the old name
+      <span class="opt">adds it as an alias, so clients still using it keep working</span></label>
+    <label class="field">Also answers to <span class="opt">other names, separated by commas</span>
+      <input name="aliases" autocomplete="off" spellcheck="false" placeholder="e.g. default, gpt-4o">
+    </label>
+    <label class="check"><input type="checkbox" name="default"> Default flow
+      <span class="opt">gets requests that name no model, or one llmanifold doesn't know</span></label>
     <label class="field">Longest wait for a lane <span class="opt">seconds; after this the request goes to the fallbacks (or fails if there are none)</span>
       <input name="queue_timeout" type="number" min="1" step="1">
     </label>

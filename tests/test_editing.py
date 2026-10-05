@@ -170,3 +170,43 @@ async def test_edits_keep_section_gaps_and_comments(stack):
     out = path.read_text()
     assert "\n\nmodels:" in out                        # the blank line before the next section survives
     assert "overflow_at: 3\n" in out
+
+
+async def test_rename_flow_keeps_default_tokens_and_auth(stack):
+    s = await stack(POOL2, {"qwen": {"pool": ["a"], "auth": "token"}, "other": {"pool": ["b"]}},
+                    default_model="qwen")
+    tok = (await (await s.admin.post("/api/tokens", json={"label": "t", "models": "qwen"})).json())["token"]
+    await s.admin.post("/api/models/qwen/auth", json={"mode": "token"})
+    r = await s.admin.put("/api/flows/qwen", json={"name": "local", "aliases": ["qwen", "big"]})
+    assert r.status == 200, await r.text()
+    disk = on_disk(s)
+    assert list(disk["models"]) == ["local", "other"]                        # same place in the file
+    assert disk["default_model"] == "local" and disk["models"]["local"]["aliases"] == ["qwen", "big"]
+    assert s.core.store.auth_override("local") == "token"
+    h = {"Authorization": f"Bearer {tok}"}
+    for name in ("local", "qwen", "big", "nonsense"):
+        r = await s.api.post("/v1/chat/completions", json=chat(name), headers=h)
+        assert r.status == 200, name
+    assert (await s.api.post("/v1/chat/completions", json=chat("big"))).status == 401
+
+
+async def test_rename_to_a_taken_name_is_refused(stack):
+    s = await stack(POOL2, {"qwen": {"pool": ["a"]}, "other": {"pool": ["b"], "aliases": ["o"]}})
+    r = await s.admin.put("/api/flows/qwen", json={"name": "other"})
+    assert r.status == 400
+    r = await s.admin.put("/api/flows/qwen", json={"name": "o"})
+    assert r.status == 400 and "both" in (await r.json())["error"]
+    assert list(on_disk(s)["models"]) == ["qwen", "other"]
+
+
+async def test_switch_default_flow(stack):
+    s = await stack(POOL2, {"qwen": {"pool": ["a"]}, "other": {"pool": ["b"]}}, default_model="qwen")
+    assert (await s.admin.put("/api/flows/other", json={"default": True})).status == 200
+    assert on_disk(s)["default_model"] == "other"
+    await s.api.post("/v1/chat/completions", json=chat("nonsense"))
+    assert s.fakes["b"].bodies
+    models = {m["name"]: m for m in (await (await s.admin.get("/api/status")).json())["models"]}
+    assert models["other"]["default"] and not models["qwen"]["default"]
+    assert (await s.admin.put("/api/flows/other", json={"default": False})).status == 200
+    assert "default_model" not in on_disk(s)
+    assert (await s.api.post("/v1/chat/completions", json=chat("nonsense"))).status == 404

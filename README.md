@@ -131,7 +131,7 @@ either kind of upstream.
 - **Dashboard.** Live alias flows and lanes, charts of traffic, speed and
   time to first token (SQLite history, 30 days by default), and token
   management, on a separate admin listener. From the admin site you can add, edit, pause and remove models (including paid APIs, with a
-  connection test) and build alias flows; changes are written back to the YAML
+  connection test) and build alias flows (rename them, give them aliases, pick the default); changes are written back to the YAML
   file with comments kept, and API keys go to files only llmanifold can read.
   Prometheus metrics at `/metrics`.
 - **Proxy-friendly.** Keepalives (SSE comments, or leading whitespace on JSON)

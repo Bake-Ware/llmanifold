@@ -103,6 +103,18 @@ class Store:
                     "updated_by=excluded.updated_by", (model, mode, time.time(), by))
             self._auth_cache[model] = mode
 
+    def rename_model(self, old: str, new: str) -> None:
+        """Carry a flow's auth override and token scopes over to its new name."""
+        self._x("UPDATE model_auth SET model=? WHERE model=?", (new, old))
+        if old in self._auth_cache:
+            self._auth_cache[new] = self._auth_cache.pop(old)
+        for r in self._q("SELECT id, models FROM tokens"):
+            models = json.loads(r["models"])
+            if old in models:
+                self._x("UPDATE tokens SET models=? WHERE id=?",
+                        (json.dumps([new if m == old else m for m in models]), r["id"]))
+        self._token_cache.clear()
+
     # ---- paused endpoints (survive restarts)
     def paused(self) -> dict[str, dict]:
         return {r["endpoint"]: r for r in self._q("SELECT endpoint, since, paused_by FROM paused")}

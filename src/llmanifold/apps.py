@@ -443,7 +443,13 @@ async def a_flow_update(request: web.Request) -> web.Response:
     b = await _body(request)
     fields = {k: b[k] for k in FLOW_FIELDS if k in b}
     name = request.match_info["name"]
-    return await _config_edit(request, f"edit flow {name}", lambda ed: ed.save_flow(name, fields, create=False))
+    rename = str(b["name"]).strip() if b.get("name") else None
+    default = bool(b["default"]) if "default" in b else None
+    resp = await _config_edit(request, f"edit flow {name}", lambda ed: ed.save_flow(
+        name, fields, create=False, rename=rename, default=default))
+    if resp.status == 200 and rename and rename != name:
+        await asyncio.to_thread(request.app[CORE].store.rename_model, name, rename)
+    return resp
 
 
 async def a_flow_delete(request: web.Request) -> web.Response:

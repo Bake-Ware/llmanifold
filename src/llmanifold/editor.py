@@ -252,8 +252,13 @@ class ConfigEditor:
         return cfg
 
     # ---------------------------------------------------------------- flows ("models" in the config)
-    async def save_flow(self, name: str, fields: dict, *, create: bool) -> Config:
+    async def save_flow(self, name: str, fields: dict, *, create: bool, rename: str | None = None,
+                        default: bool | None = None) -> Config:
+        """Create or edit a flow. `rename` gives it a new name (default_model follows it);
+        `default` True makes it the default flow, False stops it being the default."""
         name = _check_name(name, "alias flow")
+        if rename is not None:
+            rename = _check_name(rename, "alias flow")
 
         def fn(doc: CommentedMap) -> None:
             flows = _section(doc, "models")
@@ -264,11 +269,28 @@ class ConfigEditor:
             m = flows.get(name) if not create else CommentedMap()
             if m is None:
                 m = CommentedMap()
+                flows[name] = m
             _apply_fields(m, fields, FLOW_FIELDS, LIST_FIELDS)
             if create and "pool" not in m:
                 m["pool"] = _flow_seq([])
             if create:
                 _put(flows, name, m)
+            final = name
+            if rename and rename != name:
+                if rename in flows:
+                    raise EditError(f"there's already a flow called {rename!r}")
+                pos = list(flows).index(name)
+                del flows[name]
+                flows.insert(pos, rename, m)
+                if doc.get("default_model") == name:
+                    doc["default_model"] = rename
+                final = rename
+            if default:
+                _put(doc, "default_model", final)
+            elif default is False and "default_model" in doc:
+                current = doc["default_model"]
+                if current == final or current in list(m.get("aliases") or []):
+                    del doc["default_model"]
 
         return await self.edit(fn)
 

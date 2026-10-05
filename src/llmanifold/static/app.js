@@ -735,6 +735,10 @@
     const m = cfg.flows[flow];
     $('#settings-flow').textContent = flow;
     f.dataset.flow = flow;
+    f.elements.name.value = flow;
+    f.elements.aliases.value = (m.aliases || []).join(', ');
+    f.elements.default.checked = !!(status.models.find((x) => x.name === flow) || {}).default;
+    $('#keep-old-name').hidden = true;
     f.elements.queue_timeout.value = m.queue_timeout;
     f.elements.background_max_lanes.value = m.background_max_lanes ?? '';
     f.elements.allow_metered_unauthenticated.checked = !!m.allow_metered_unauthenticated;
@@ -742,9 +746,12 @@
   }
   $('#settings-form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
-    const f = ev.target, el = f.elements;
+    const f = ev.target, el = f.elements, old = f.dataset.flow, name = el.name.value.trim();
+    const aliases = el.aliases.value.split(',').map((a) => a.trim()).filter((a) => a && a !== name);
+    if (name !== old && el.keep_old.checked && !aliases.includes(old)) aliases.push(old);
     try {
-      await post(`/api/flows/${enc(f.dataset.flow)}`, {
+      await post(`/api/flows/${enc(old)}`, {
+        name, aliases, default: el.default.checked,
         queue_timeout: Number(el.queue_timeout.value) || 120,
         background_max_lanes: el.background_max_lanes.value ? Number(el.background_max_lanes.value) : null,
         allow_metered_unauthenticated: el.allow_metered_unauthenticated.checked,
@@ -752,6 +759,9 @@
       $('#settings-dialog').close();
       await tick();
     } catch (e) { formError(f, e.message); }
+  });
+  $('#settings-form').elements.name.addEventListener('input', (ev) => {
+    $('#keep-old-name').hidden = ev.target.value.trim() === ev.target.form.dataset.flow;
   });
   $('#add-model').addEventListener('click', () => openModelDialog(null).catch((e) => banner(e.message)));
 

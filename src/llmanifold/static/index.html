@@ -63,6 +63,15 @@
     <div class="tiles tiles-6" id="req-tiles"></div>
     <div id="charts" class="charts"></div>
     <section class="panel">
+      <h2>By caller</h2>
+      <p class="muted">Who sent requests in this range: a token's label, or the address of a caller without a token.</p>
+      <div class="table-wrap"><table class="grid" id="callers">
+        <thead><tr><th>Caller</th><th>Requests</th><th>Failed</th><th>Fell back</th><th>Paid</th>
+          <th>Tokens in / out</th><th>Flows</th><th>Last request</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </section>
+    <section class="panel">
       <h2>Latest failures and fallbacks</h2>
       <div class="table-wrap"><table class="grid" id="problems">
         <thead><tr><th>Time</th><th>Flow</th><th>Served by</th><th>Client</th><th>What happened</th></tr></thead>
@@ -226,7 +235,7 @@
         <input name="model" placeholder="deepseek-chat">
         <select id="model-pick" aria-label="Pick one of the models this API offers" hidden></select>
       </label>
-      <label class="field">Requests at once
+      <label class="field">Requests at once <span class="opt">in total; also each flow's default</span>
         <input name="max_concurrency" type="number" min="1" max="256" value="1">
       </label>
     </div>
@@ -263,9 +272,16 @@
         <input name="service_tier" placeholder="the API's default">
       </label>
     </div>
-    <label class="field">Give up if nothing arrives within <span class="opt">seconds; then the flow falls back. Blank: the flow's setting (5 minutes)</span>
-      <input name="first_token_timeout" type="number" min="1" step="1" placeholder="e.g. 30">
-    </label>
+    <div class="row2">
+      <label class="field">Give up if nothing arrives within <span class="opt">seconds; then the flow falls back. Blank: the flow's setting (5 minutes)</span>
+        <input name="first_token_timeout" type="number" min="1" step="1" placeholder="e.g. 30">
+      </label>
+      <label class="field">Requests per minute <span class="opt">in total; over it the model counts as busy. Blank: no limit</span>
+        <input name="rate_limit" type="number" min="1" step="1" placeholder="no limit">
+      </label>
+    </div>
+    <p class="muted small">Each flow can set its own requests at once, requests per minute, give-up time and
+      backlog help for this model, with <b>Limits</b> on its lane in the Overview; these are the defaults.</p>
     <label class="field">Help clear a backlog <span class="opt">when this is a flow's fallback: take requests once this many are waiting for a lane. Blank: only when the pool fails or the longest wait runs out.</span>
       <input name="overflow_at" type="number" min="1" step="1" placeholder="e.g. 5">
     </label>
@@ -352,6 +368,32 @@
       <button type="button" class="secondary" data-close>Close</button>
     </div>
   </div>
+</dialog>
+
+<dialog id="limits-dialog" class="confirm form-dialog">
+  <form id="limits-form">
+    <h2>Limits in this flow</h2>
+    <p class="muted small sub">for <b id="limits-model"></b> in <b id="limits-flow"></b>. Blank: the model's own setting, shown greyed.</p>
+    <div class="row2">
+      <label class="field">Requests at once <span class="opt">from this flow; the model's own limit still caps the total</span>
+        <input name="max_concurrency" type="number" min="1" step="1">
+      </label>
+      <label class="field">Requests per minute <span class="opt">started from this flow; over it the model counts as busy</span>
+        <input name="rate_limit" type="number" min="1" step="1">
+      </label>
+    </div>
+    <label class="field">Give up if nothing arrives within <span class="opt">seconds; then the flow falls back</span>
+      <input name="first_token_timeout" type="number" min="1" step="1">
+    </label>
+    <label class="field" id="limits-overflow">Help clear a backlog <span class="opt">take requests once this many are waiting for a lane</span>
+      <input name="overflow_at" type="number" min="1" step="1">
+    </label>
+    <p class="form-error" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" data-close>Cancel</button>
+      <button type="submit">Save</button>
+    </div>
+  </form>
 </dialog>
 
 <dialog id="settings-dialog" class="confirm form-dialog">

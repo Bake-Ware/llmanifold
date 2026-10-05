@@ -150,7 +150,8 @@ async def build(tmp: Path):
         "models": {
             "local-large": {"aliases": ["default", "gpt-4o"], "pool": ["gpu0", "gpu1"], "fallback": ["deepseek", "chatgpt"],
                             "queue_timeout": 120, "background_max_lanes": 1, "auth": "open",
-                            "input_modalities": ["text", "image"], "allow_metered_unauthenticated": True},
+                            "input_modalities": ["text", "image"], "allow_metered_unauthenticated": True,
+                            "limits": {"deepseek": {"max_concurrency": 4, "rate_limit": 60}}},
             "small-fast": {"aliases": ["bulk"], "pool": ["gpu2"], "auth": "open"},
             "sonnet": {"pool": ["claude"], "auth": "token"},
         },
@@ -261,6 +262,12 @@ async def screenshots(browser, admin: str, out: Path) -> None:
     await page.keyboard.press("Escape")
 
     await page.click('a[data-view="overview"]')
+    await page.click('button[data-limits="deepseek"][data-flow="local-large"]')
+    await page.wait_for_selector("#limits-dialog[open]")
+    await page.wait_for_timeout(300)
+    await shot(page, "flow-limits.png")
+    await page.keyboard.press("Escape")
+
     await page.click('button[data-flow-settings="local-large"]')
     await page.wait_for_selector("#settings-dialog[open]")
     await page.fill('#settings-form input[name="name"]', "local-xl")     # mid-rename, so the keep-old-name option shows

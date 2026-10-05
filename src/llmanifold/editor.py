@@ -26,7 +26,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.tokens import CommentToken
 
-from .config import CONNECTION_FIELDS, DIALECTS, PROBES, Config, ConfigError, parse
+from .config import CONNECTION_FIELDS, DIALECTS, MEMBER_LIMITS, PROBES, Config, ConfigError, parse
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,99}$")
 KEEP_BACKUPS = 20
@@ -34,7 +34,7 @@ KEEP_BACKUPS = 20
 # fields the admin site may set, in the order they're written for a new entry
 ENDPOINT_FIELDS = ("url", "dialect", "login", "model", "max_concurrency", "context", "probe", "metered", "fallback",
                    "overflow_at", "first_token_timeout", "timeout", "connect_timeout", "reasoning_effort",
-                   "service_tier", "provider")
+                   "service_tier", "provider", "rate_limit")
 PROVIDER_FIELDS = ("url", "dialect", "login", "max_concurrency", "probe", "metered", "timeout", "connect_timeout",
                    "json_schema")
 FLOW_FIELDS = ("aliases", "pool", "fallback", "fallback_on", "auth", "allow_metered_unauthenticated",
@@ -138,6 +138,14 @@ def _providers_section(doc: CommentedMap) -> CommentedMap:
     keys = list(doc.keys())
     doc.insert(keys.index("endpoints") if "endpoints" in keys else len(keys), "providers", sec)
     return sec
+
+
+def _drop_limits(flow: CommentedMap, endpoint: str) -> None:
+    lim = flow.get("limits")
+    if isinstance(lim, dict) and endpoint in lim:
+        del lim[endpoint]
+        if not lim:
+            del flow["limits"]
 
 
 def _flows_using(doc: CommentedMap, endpoint: str) -> list[str]:
@@ -265,6 +273,7 @@ class ConfigEditor:
                 for role in ("pool", "fallback"):
                     if name in list(m.get(role) or []):
                         m[role] = _flow_seq([x for x in m[role] if x != name])
+                _drop_limits(m, name)
                 if not list(m.get("pool") or []) and not list(m.get("fallback") or []):
                     raise EditError(f"removing {name} would leave {flow} with nothing to route to; "
                                     "delete that flow first")
@@ -399,6 +408,48 @@ class ConfigEditor:
 
         return await self.edit(fn)
 
+    async def set_member_limits(self, flow: str, endpoint: str, values: dict) -> Config:
+        """A flow's own limits for one of its models; a None or blank value goes back to the model's."""
+        unknown = set(values) - set(MEMBER_LIMITS)
+        if unknown:
+            raise EditError(f"can't set {sorted(unknown)} here")
+
+        def fn(doc: CommentedMap) -> None:
+            flows = _section(doc, "models")
+            if flow not in flows:
+                raise EditError(f"no flow called {flow!r}")
+            m = flows[flow]
+            if endpoint not in list(m.get("pool") or []) + list(m.get("fallback") or []):
+                raise EditError(f"{endpoint} isn't in {flow}")
+            lim = m.get("limits")
+            if not isinstance(lim, dict):
+                lim = CommentedMap()
+            entry = lim.get(endpoint)
+            if not isinstance(entry, dict):
+                entry = CommentedMap()
+            for k in MEMBER_LIMITS:
+                if k not in values:
+                    continue
+                v = values[k]
+                if v is None or v == "":
+                    entry.pop(k, None)
+                else:
+                    try:
+                        entry[k] = float(v) if k == "first_token_timeout" else int(v)
+                    except (TypeError, ValueError):
+                        raise EditError(f"{k} must be a number") from None
+            if entry:
+                entry.fa.set_flow_style()
+                lim[endpoint] = entry
+            elif endpoint in lim:
+                del lim[endpoint]
+            if lim:
+                _put(m, "limits", lim)
+            else:
+                m.pop("limits", None)
+
+        return await self.edit(fn)
+
     async def remove_member(self, flow: str, endpoint: str) -> Config:
         def fn(doc: CommentedMap) -> None:
             flows = _section(doc, "models")
@@ -413,6 +464,7 @@ class ConfigEditor:
                     found = True
             if not found:
                 raise EditError(f"{endpoint} isn't in {flow}")
+            _drop_limits(m, endpoint)
             if not list(m.get("pool") or []) and not list(m.get("fallback") or []):
                 raise EditError(f"{endpoint} is the last model in {flow}; delete the flow instead")
 

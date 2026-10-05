@@ -20,6 +20,7 @@ AFFINITY_MAX = 2048
 LIVE_WINDOW = 5.0    # seconds of streamed tokens behind an endpoint's live tokens-per-second figure
 BUSY_FRESH = 4.0     # seconds a probed busy flag stays trustworthy
 SLOW_COOLDOWN = 60.0 # a remote API that stalled is skipped this long, then gets one request at a time
+RATE_WINDOW = 60.0   # rate limits count requests started in this many seconds
 
 
 @dataclass
@@ -47,6 +48,16 @@ class EndpointState:
     balance: list | None = None    # prepaid credit left, where the API reports it: [{"amount", "currency"}]
     live: deque = field(default_factory=deque)   # (when, tokens) streamed in the last LIVE_WINDOW seconds
     quota: list | None = None      # plan allowance used: [{"used_percent", "window_seconds", "reset_at"}]
+    flow_inflight: dict = field(default_factory=dict)  # flow -> requests in flight from it
+    flow_of: dict = field(default_factory=dict)        # request id -> the flow it came through
+    starts: deque = field(default_factory=deque)       # (when, flow) of requests started in the last RATE_WINDOW
+
+    def started_recently(self, flow: str | None = None, now: float | None = None) -> int:
+        """Requests started in the last minute, from one flow or from all."""
+        cutoff = (now or time.monotonic()) - RATE_WINDOW
+        while self.starts and self.starts[0][0] < cutoff:
+            self.starts.popleft()
+        return len(self.starts) if flow is None else sum(1 for _, f in self.starts if f == flow)
 
     @property
     def capacity(self) -> int:
@@ -126,6 +137,8 @@ class EndpointState:
                 "last_error": self.last_error, "last_ok": self.last_ok or None,
                 "requests": self.requests, "errors": self.errors, "tokens_in": self.tokens_in,
                 "tokens_out": self.tokens_out,
+                "flow_inflight": {f: n for f, n in self.flow_inflight.items() if n},
+                "per_minute": self.started_recently(),
                 "tps": round(self.tps_ema, 1) if self.tps_ema else None, "tps_now": self.tps_now(),
                 "ttft": round(self.ttft_ema, 2) if self.ttft_ema else None,
                 "balance": self.balance, "quota": self.quota,
@@ -186,10 +199,21 @@ class Router:
         return sum(1 for w in self._waiting if model is None or w.model == model)
 
     # ---- selection
-    def has_room(self, st: EndpointState, now: float | None = None) -> bool:
-        """Below its own limit, and below its provider's shared limit if it has one."""
+    def has_room(self, st: EndpointState, now: float | None = None, flow: Model | None = None) -> bool:
+        """Below its own limits (lanes, requests per minute), below what `flow` allows it for that
+        flow, and below its provider's shared limit if it has one."""
+        now = now or time.monotonic()
         if st.load(now) >= st.capacity:
             return False
+        if st.cfg.rate_limit and st.started_recently(None, now) >= st.cfg.rate_limit:
+            return False
+        if flow is not None:
+            cap = flow.limit(st.name, "max_concurrency")
+            if cap is not None and not st.probation and st.flow_inflight.get(flow.name, 0) >= cap:
+                return False
+            rate = flow.limit(st.name, "rate_limit")
+            if rate is not None and st.started_recently(flow.name, now) >= rate:
+                return False
         pv = self.cfg.providers.get(st.cfg.provider) if st.cfg.provider else None
         if pv is None or pv.max_concurrency is None:
             return True
@@ -220,7 +244,7 @@ class Router:
             if sum(s.bg_inflight for s in cands) >= model.background_max_lanes:
                 return None
         now = time.monotonic()
-        free = [s for s in cands if self.has_room(s, now)]
+        free = [s for s in cands if self.has_room(s, now, model)]
         if not free:
             return None
         pref = self._affinity.get(key) if (key and model.affinity) else None
@@ -231,8 +255,13 @@ class Router:
         best = [s for s in free if s.load(now) == low]
         return best[next(self._rr) % len(best)]
 
-    def _reserve(self, st: EndpointState, background: bool, key: str | None, rid: str, desc: str) -> None:
+    def _reserve(self, st: EndpointState, background: bool, key: str | None, rid: str, desc: str,
+                 flow: str | None = None) -> None:
         st.inflight += 1
+        st.starts.append((time.monotonic(), flow))
+        if flow is not None:
+            st.flow_inflight[flow] = st.flow_inflight.get(flow, 0) + 1
+            st.flow_of[rid] = flow
         if background:
             st.bg_inflight += 1
         st.current[rid] = desc
@@ -264,15 +293,15 @@ class Router:
                     if not ahead:
                         st = self._pick(model, key, background, min_context)
                         if st is not None:
-                            self._reserve(st, background, key, rid, desc)
+                            self._reserve(st, background, key, rid, desc, model.name)
                             return st
                     position = len(ahead) + 1
                     for name, n in overflow:
                         ost = self.states.get(name)
                         if (position >= n and ost is not None and ost.usable
-                                and self.has_room(ost)
+                                and self.has_room(ost, flow=model)
                                 and not (min_context and ost.cfg.context and ost.cfg.context < min_context)):
-                            self._reserve(ost, background, None, rid, desc)
+                            self._reserve(ost, background, None, rid, desc, model.name)
                             return ost
                     remaining = deadline - loop.time()
                     if remaining <= 0:
@@ -286,13 +315,14 @@ class Router:
                 self._waiting.remove(w)
                 self._cond.notify_all()
 
-    async def try_endpoint(self, name: str, *, background: bool, rid: str = "", desc: str = "") -> EndpointState | None:
-        """Reserve a specific (fallback) endpoint if it has room right now."""
+    async def try_endpoint(self, name: str, *, background: bool, rid: str = "", desc: str = "",
+                           flow: Model | None = None) -> EndpointState | None:
+        """Reserve a specific (fallback) endpoint if it has room right now, for `flow`."""
         async with self._cond:
             st = self.states.get(name)
-            if st is None or not st.usable or not self.has_room(st):
+            if st is None or not st.usable or not self.has_room(st, flow=flow):
                 return None
-            self._reserve(st, background, None, rid, desc)
+            self._reserve(st, background, None, rid, desc, flow.name if flow else None)
             return st
 
     async def release(self, st: EndpointState, background: bool, rid: str = "") -> None:
@@ -304,6 +334,9 @@ class Router:
             if background:
                 st.bg_inflight = max(0, st.bg_inflight - 1)
             st.current.pop(rid, None)
+            flow = st.flow_of.pop(rid, None)
+            if flow is not None:
+                st.flow_inflight[flow] = max(0, st.flow_inflight.get(flow, 0) - 1)
             self._cond.notify_all()
 
     async def set_draining(self, name: str, draining: bool) -> bool:

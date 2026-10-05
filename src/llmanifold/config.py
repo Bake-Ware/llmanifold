@@ -22,6 +22,8 @@ DEFAULT_TRIGGERS = ("connect", "timeout", "slow", "5xx", "429", "context", "empt
 JSON_SCHEMA_MODES = ("native", "emulate")
 LEGACY_ADMIN_KEYS = ("trusted_proxies", "human_header", "allowed_emails", "local_humans")
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+# a flow can set these for each of its endpoints; the endpoint's own value is the default
+MEMBER_LIMITS = ("max_concurrency", "overflow_at", "first_token_timeout", "rate_limit")
 
 
 class ConfigError(ValueError):
@@ -77,6 +79,7 @@ class Endpoint:
     stream_usage: bool = True      # ask OpenAI-style engines for token counts on streams
     reasoning_effort: str | None = None  # sent when the client names none: none | minimal | low | medium | high | ...
     service_tier: str | None = None      # sent upstream as service_tier (e.g. "priority" on the Codex backend)
+    rate_limit: int | None = None  # requests started per minute; over it the endpoint counts as busy
     json_schema: str | None = None # response_format json_schema: "native" passes it through; "emulate" uses JSON
                                    # mode, checks the reply and asks again if it doesn't fit. Default: emulate for DeepSeek
     headers: dict[str, str] = field(default_factory=dict)
@@ -127,6 +130,12 @@ class Model:
     context: int | None = None                       # advertised context (default: smallest in pool)
     input_modalities: list[str] | None = None        # advertised in /v1/models, e.g. [text, image]
     description: str = ""
+    limits: dict[str, dict] = field(default_factory=dict)   # endpoint -> {max_concurrency, overflow_at,
+                                                            # first_token_timeout} for this flow only
+
+    def limit(self, endpoint: str, name: str):
+        """This flow's own setting for one of its endpoints, or None to use the endpoint's."""
+        return (self.limits.get(endpoint) or {}).get(name)
 
 
 @dataclass
@@ -271,6 +280,8 @@ def parse(raw: dict[str, Any], path: str | None = None) -> Config:
             raise ConfigError(f"endpoint {name!r}: reasoning_effort must be one of {REASONING_EFFORTS}")
         if ep.max_concurrency < 1:
             raise ConfigError(f"endpoint {name!r}: max_concurrency must be >= 1")
+        if ep.rate_limit is not None and (not isinstance(ep.rate_limit, int) or ep.rate_limit < 1):
+            raise ConfigError(f"endpoint {name!r}: rate_limit must be a whole number of requests per minute >= 1")
         if ep.overflow_at is not None and (not isinstance(ep.overflow_at, int) or ep.overflow_at < 1):
             raise ConfigError(f"endpoint {name!r}: overflow_at must be a whole number >= 1")
         cfg.endpoints[name] = ep
@@ -294,6 +305,19 @@ def parse(raw: dict[str, Any], path: str | None = None) -> Config:
         for ep in [*m.pool, *m.fallback]:
             if ep not in cfg.endpoints:
                 raise ConfigError(f"model {name!r}: unknown endpoint {ep!r}")
+        m.limits = {str(k): dict(v or {}) for k, v in (m.limits or {}).items()}
+        for ep, lim in m.limits.items():
+            if ep not in m.pool and ep not in m.fallback:
+                raise ConfigError(f"model {name!r}: limits for {ep!r}, which isn't in its pool or fallback")
+            bad = set(lim) - set(MEMBER_LIMITS)
+            if bad:
+                raise ConfigError(f"model {name!r}: limits for {ep!r} can only set {MEMBER_LIMITS}")
+            for k in ("max_concurrency", "overflow_at", "rate_limit"):
+                if lim.get(k) is not None and (not isinstance(lim[k], int) or lim[k] < 1):
+                    raise ConfigError(f"model {name!r}: limits.{ep}.{k} must be a whole number >= 1")
+            if lim.get("first_token_timeout") is not None and not (
+                    isinstance(lim["first_token_timeout"], (int, float)) and lim["first_token_timeout"] > 0):
+                raise ConfigError(f"model {name!r}: limits.{ep}.first_token_timeout must be a number > 0")
         for ep in m.pool:
             if cfg.endpoints[ep].fallback:
                 raise ConfigError(f"model {name!r}: endpoint {ep!r} is fallback-only and can't be in a pool")

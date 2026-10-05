@@ -123,16 +123,21 @@
       : `<button class="small secondary" data-pause="${esc(e.name)}">Pause</button>`;
     const left = [balanceText(e.balance), quotaText(e.quota)].filter(Boolean).join(' · ');
     const settings = `<button class="small secondary edit-only" data-edit-model="${esc(e.name)}">Settings</button>`;
+    const fm = status.models.find((m) => m.name === flow) || {}, lim = (fm.limits || {})[e.name] || {};
+    const own = [lim.max_concurrency ? `${(e.flow_inflight || {})[flow] || 0}/${lim.max_concurrency} from here` : '',
+      lim.rate_limit ? `${lim.rate_limit}/min` : ''].filter(Boolean).join(' · ');
+    const limits = `<button class="small secondary edit-only ${own ? 'set' : ''}" data-limits="${esc(e.name)}" data-flow="${esc(flow)}"
+      data-fallback="${fallback ? 1 : ''}" title="This flow's limits for ${esc(e.name)}">Limits</button>`;
     const remove = `<button class="small icon edit-only" data-remove-member="${esc(e.name)}" data-flow="${esc(flow)}"
       aria-label="Remove ${esc(e.name)} from ${esc(flow)}" title="Remove from this flow">✕</button>`;
     return `<div class="lane ${st} ${fallback ? 'fallback' : ''}" data-lane="${esc(e.name)}">
       <span class="st" title="${st}"></span>
-      <span class="ln">${esc(e.name)}<span class="asks" title="${e.model ? 'Model name sent to this engine' : 'Sends the name the client asked for'}">(${esc(e.model || flow)})</span>${left ? `<em class="left">${esc(left)}</em>` : ''}<small>${esc(tags || `${e.inflight}/${e.max_concurrency} in use`)}</small></span>
+      <span class="ln">${esc(e.name)}<span class="asks" title="${e.model ? 'Model name sent to this engine' : 'Sends the name the client asked for'}">(${esc(e.model || flow)})</span>${left ? `<em class="left">${esc(left)}</em>` : ''}<small>${esc([tags || `${e.inflight}/${e.max_concurrency} in use`, own].filter(Boolean).join(' · '))}</small></span>
       <span class="now" title="${esc(laneNow(e, st))}">${esc(laneNow(e, st))}</span>
       ${e.inflight > 1 && e.tps_now
     ? `<span class="speed" title="All ${e.inflight} requests running on this model, added together${e.tps ? `; about ${e.tps} t/s each` : ''}">${e.tps_now.toFixed(1)} t/s<small>total of ${e.inflight}</small></span>`
     : `<span class="speed">${e.tps ? e.tps + ' t/s' : '–'}<small>${e.ttft ? 'first ' + e.ttft + 's' : num(e.requests) + ' served'}</small></span>`}
-      <span class="lane-act">${pause}${settings}${remove}</span></div>`;
+      <span class="lane-act">${pause}${limits}${settings}${remove}</span></div>`;
   }
   function drawPipes(row) {
     const cell = $('.pipes-cell', row), svg = $('svg.pipes', row), lanes = $('.lanes', row), intake = $('.intake', row);
@@ -423,6 +428,17 @@
     ];
     $('#req-tiles').innerHTML = tiles.map(([k, l]) => `<div class="tile"><div class="k">${k}</div><div class="l">${l}</div></div>`).join('');
     drawCharts();
+    const top = Math.max(1, ...h.callers.map((c) => c.requests));
+    $('#callers tbody').innerHTML = h.callers.map((c) => `<tr>
+      <td class="wrap"><b>${esc(c.client || '?')}</b> <span class="chip">${c.token ? 'token' : 'no token'}</span>${c.background ? ` <span class="chip">${num(c.background)} background</span>` : ''}</td>
+      <td class="mono"><span class="share" style="--w:${Math.round((100 * c.requests) / top)}%"></span>${num(c.requests)}</td>
+      <td class="mono ${c.errors ? 'bad' : ''}">${num(c.errors)}</td>
+      <td class="mono">${num(c.fallbacks)}</td>
+      <td class="mono">${num(c.metered)}</td>
+      <td class="mono">${num(c.tokens_in)} / ${num(c.tokens_out)}</td>
+      <td class="chain wrap">${esc(c.flows.join(', ') || '–')}</td>
+      <td class="mono">${ago(c.last)}</td></tr>`).join('')
+      || '<tr><td colspan="8" class="empty">No requests in this range.</td></tr>';
     $('#problems tbody').innerHTML = h.problems.slice(0, 10).map((r) => {
       const trail = (r.attempts || []).filter((a) => a.trigger || a.skipped).map((a) => `${a.endpoint}: ${a.skipped || a.trigger}`).join('; ');
       const what = r.ok ? `<span class="ok">answered</span> after falling back${trail ? ` (${esc(trail)})` : ''}` : `<span class="bad">${esc(r.error || 'failed')}</span>`;
@@ -524,7 +540,7 @@
   let editing = null;
   function fillModelForm(v) {
     const f = $('#model-form');
-    for (const k of ['name', 'url', 'dialect', 'login', 'model', 'max_concurrency', 'context', 'probe', 'overflow_at', 'first_token_timeout', 'reasoning_effort', 'service_tier']) {
+    for (const k of ['name', 'url', 'dialect', 'login', 'model', 'max_concurrency', 'context', 'probe', 'overflow_at', 'first_token_timeout', 'reasoning_effort', 'service_tier', 'rate_limit']) {
       if (k in v) f.elements[k].value = v[k] ?? '';
     }
     for (const k of ['metered', 'fallback']) if (k in v) f.elements[k].checked = !!v[k];
@@ -575,10 +591,10 @@
       f.elements.provider.value = sp.provider || '';
       fillModelForm({ name, ...sp, context: sp.context || '', overflow_at: sp.overflow_at || '', login: sp.login || '',
         first_token_timeout: sp.first_token_timeout || '', reasoning_effort: sp.reasoning_effort || '',
-        service_tier: sp.service_tier || '' });
+        service_tier: sp.service_tier || '', rate_limit: sp.rate_limit || '' });
       f.elements.key.placeholder = sp.key_set ? 'saved; leave blank to keep it' : 'sk-…';
     } else {
-      fillModelForm({ overflow_at: '', login: '', first_token_timeout: '', reasoning_effort: '', service_tier: '', ...PRESETS.local });
+      fillModelForm({ overflow_at: '', login: '', first_token_timeout: '', reasoning_effort: '', service_tier: '', rate_limit: '', ...PRESETS.local });
       f.elements.key.placeholder = 'sk-…';
       if (from) {
         const pv = cfg.providers[from];
@@ -605,7 +621,7 @@
     if (ev.target.value) $('#model-form').elements.model.value = ev.target.value;
   });
   $('#model-form').elements.preset.addEventListener('change', (ev) => {
-    if (!editing) fillModelForm({ context: '', overflow_at: '', login: '', first_token_timeout: '', reasoning_effort: '', service_tier: '', ...PRESETS[ev.target.value] });
+    if (!editing) fillModelForm({ context: '', overflow_at: '', login: '', first_token_timeout: '', reasoning_effort: '', service_tier: '', rate_limit: '', ...PRESETS[ev.target.value] });
   });
   $('#test-model').addEventListener('click', async () => {
     const f = $('#model-form'), out = $('#test-result');
@@ -637,6 +653,7 @@
       login: el.login.value || null,
       first_token_timeout: el.first_token_timeout.value ? Number(el.first_token_timeout.value) : null,
       reasoning_effort: el.reasoning_effort.value || null, service_tier: el.service_tier.value.trim() || null,
+      rate_limit: el.rate_limit.value ? Number(el.rate_limit.value) : null,
     };
     if (via) {     // the connection, health check and cost come from the provider
       for (const k of ['url', 'dialect', 'login', 'probe', 'metered']) delete body[k];
@@ -866,6 +883,37 @@
     } catch (e) { formError(box, e.message); }
   });
 
+  async function openLimitsDialog(flow, name, fallback) {
+    const f = $('#limits-form');
+    f.reset();
+    formError(f, '');
+    cfg = await api('/api/config');
+    const sp = cfg.endpoints[name] || {}, lim = ((status.models.find((m) => m.name === flow) || {}).limits || {})[name] || {};
+    $('#limits-flow').textContent = flow;
+    $('#limits-model').textContent = name;
+    f.dataset.flow = flow;
+    f.dataset.model = name;
+    const dflt = { max_concurrency: sp.max_concurrency, rate_limit: sp.rate_limit || 'no limit',
+      first_token_timeout: sp.first_token_timeout || (cfg.flows[flow] || {}).first_token_timeout || 300,
+      overflow_at: sp.overflow_at || 'only when the pool fails' };
+    for (const k of Object.keys(dflt)) {
+      f.elements[k].value = lim[k] ?? '';
+      f.elements[k].placeholder = `model's: ${dflt[k]}`;
+    }
+    $('#limits-overflow').hidden = !fallback;
+    $('#limits-dialog').showModal();
+  }
+  $('#limits-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const f = ev.target, el = f.elements, body = {};
+    for (const k of ['max_concurrency', 'rate_limit', 'first_token_timeout', 'overflow_at']) body[k] = el[k].value ? Number(el[k].value) : null;
+    try {
+      await post(`/api/flows/${enc(f.dataset.flow)}/members/${enc(f.dataset.model)}/limits`, body, 'PUT');
+      $('#limits-dialog').close();
+      await tick();
+    } catch (e) { formError(f, e.message); }
+  });
+
   async function openSettingsDialog(flow) {
     const f = $('#settings-form');
     f.reset();
@@ -931,6 +979,9 @@
       } else if (d.deleteProvider) {
         if (!(await confirmAction(`Remove the ${d.deleteProvider} provider?`, 'llmanifold forgets its address and saved key. Models that come from it must be removed or moved first.', 'Remove', true))) return;
         await api(`/api/providers/${enc(d.deleteProvider)}`, { method: 'DELETE' });
+      } else if (d.limits) {
+        await openLimitsDialog(d.flow, d.limits, !!d.fallback);
+        return;
       } else if (d.flowSettings) {
         await openSettingsDialog(d.flowSettings);
         return;

@@ -107,11 +107,12 @@ async def passthrough(request: web.Request) -> web.StreamResponse:
     tok = core.store.lookup_token(core.client_token(request))
     if core.effective_auth(model) == "token" and not (tok and ("*" in tok["models"] or model.name in tok["models"])):
         return web.json_response(D.error_body("openai", "this model needs a valid token"), status=401)
+    rid = os.urandom(6).hex()
     st = await core.router.acquire(model, key=None, background=False, timeout=model.queue_timeout,
-                                   rid=os.urandom(6).hex(), desc=f"passthrough {request.path}")
+                                   rid=rid, desc=f"passthrough {request.path}")
     if st is None or st.cfg.dialect != "openai":
         if st is not None:
-            await core.router.release(st, False)
+            await core.router.release(st, False, rid)
         return web.json_response(D.error_body("openai", "no OpenAI-compatible endpoint free"), status=503)
     try:
         if st.cfg.model:
@@ -134,7 +135,7 @@ async def passthrough(request: web.Request) -> web.StreamResponse:
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         return web.json_response(D.error_body("openai", f"upstream: {e}"), status=502)
     finally:
-        await core.router.release(st, False)
+        await core.router.release(st, False, rid)
 
 
 def build_api_app(core: Core) -> web.Application:
@@ -229,6 +230,7 @@ def model_rows(core: Core) -> list[dict]:
                      "background_max_lanes": m.background_max_lanes, "context": m.context,
                      "queued": core.router.queue_depth(m.name), "warning": warn,
                      "default": bool(core.cfg.default_model and core.cfg.resolve(core.cfg.default_model) is m),
+                     "limits": m.limits,
                      "description": m.description})
     return rows
 
@@ -543,6 +545,12 @@ async def a_member_add(request: web.Request) -> web.Response:
         flow, str(b.get("endpoint") or ""), str(b.get("role") or "pool")))
 
 
+async def a_member_limits(request: web.Request) -> web.Response:
+    b = await _body(request)
+    flow, ep = request.match_info["name"], request.match_info["endpoint"]
+    return await _config_edit(request, f"limits for {ep} in {flow}", lambda ed: ed.set_member_limits(flow, ep, b))
+
+
 async def a_member_remove(request: web.Request) -> web.Response:
     flow, ep = request.match_info["name"], request.match_info["endpoint"]
     return await _config_edit(request, f"remove {ep} from {flow}", lambda ed: ed.remove_member(flow, ep))
@@ -664,6 +672,7 @@ def build_admin_app(core: Core) -> web.Application:
     r.add_delete("/api/flows/{name}", a_flow_delete)
     r.add_post("/api/flows/{name}/members", a_member_add)
     r.add_delete("/api/flows/{name}/members/{endpoint}", a_member_remove)
+    r.add_put("/api/flows/{name}/members/{endpoint}/limits", a_member_limits)
     r.add_post("/api/reload", a_reload)
     r.add_get("/api/tokens", a_tokens)
     r.add_post("/api/tokens", a_token_create)

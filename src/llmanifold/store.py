@@ -249,7 +249,26 @@ class Store:
         for r in problems:
             r["attempts"] = json.loads(r["attempts"] or "[]")
         return {"bucket": bucket, "start": start, "now": now, "endpoints": known, "buckets": buckets,
-                "totals": tot, "problems": problems}
+                "totals": tot, "problems": problems, "callers": self.callers(since)}
+
+    def callers(self, since: float) -> list[dict]:
+        """Who sent requests since `since`: a token's label, or the address of a caller without one."""
+        rows = self._q(
+            "SELECT client, COUNT(*) AS requests, SUM(ok) AS ok, SUM(1 - ok) AS errors, SUM(fallback) AS fallbacks, "
+            "SUM(metered) AS metered, SUM(COALESCE(tokens_in, 0)) AS tokens_in, "
+            "SUM(COALESCE(tokens_out, 0)) AS tokens_out, MAX(ts) AS last, "
+            "SUM(priority = 'background') AS background "
+            "FROM requests WHERE ts>=? GROUP BY client ORDER BY requests DESC LIMIT 100", (since,))
+        flows = self._q("SELECT client, model, COUNT(*) AS n FROM requests WHERE ts>=? GROUP BY client, model "
+                        "ORDER BY n DESC", (since,))
+        labels = {r["label"] for r in self._q("SELECT label FROM tokens")}
+        by = {}
+        for f in flows:
+            by.setdefault(f["client"], []).append(f["model"])
+        for r in rows:
+            r["token"] = r["client"] in labels
+            r["flows"] = [m for m in by.get(r["client"], []) if m][:4]
+        return rows
 
     def prune(self, days: int) -> int:
         return self._x("DELETE FROM requests WHERE ts<?", (time.time() - days * 86400,)).rowcount

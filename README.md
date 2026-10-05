@@ -130,6 +130,12 @@ either kind of upstream.
   plan, the way the Codex CLI does. Sign in from the admin site with a device
   code (or paste a Codex `auth.json`); tokens refresh by themselves and are
   stored in `<data_dir>/chatgpt/` (mode 600).
+- **Limits per flow.** An endpoint's requests at once, requests per minute
+  (`rate_limit`), give-up time and backlog help are its defaults; each flow
+  can set its own for any of its endpoints (`limits:`), for example letting
+  one flow use only four of a paid API's lanes, or thirty requests a minute.
+  The endpoint's own figures still cap the total across flows. A model at its
+  limit counts as busy: requests wait for a lane or go to the flow's fallbacks.
 - **Priorities.** Requests marked background (by token, or the
   `X-LLManifold-Priority: background` header) queue behind interactive ones and
   can be limited to N lanes per model.
@@ -160,7 +166,13 @@ with the engine and the model name it is asked for, as in `gpu0 (local-large)`;
 an engine with no `model` set is sent the name the client used. Busy pipes run
 amber, fallbacks are dashed, and anything waiting for a lane is listed
 underneath. Pause a model from here and it finishes what it has and takes
-nothing new.
+nothing new. **Limits** on a lane sets that flow's own requests at once,
+requests per minute, give-up time and backlog help for the model; blank fields
+fall back to the model's settings.
+
+<p align="center">
+  <img src="docs/img/flow-limits.png" alt="Limits dialog for a model in one flow, with the model's defaults greyed" width="78%">
+</p>
 
 A flow's **Settings** rename it, change the other names it answers to, and make
 it the default flow (the one that gets requests naming no model, or a model
@@ -174,7 +186,10 @@ can stay on as an alias, so clients still using it keep working.
 
 **Requests** charts traffic by the model that answered, output speed, and time to
 first token (typical and 95th percentile) over the last hour, six hours, day or
-week, with the latest failures and fallbacks listed below.
+week. Below the charts, **By caller** shows who sent what (a token's label, or
+the address of a caller without one): requests, failures, fallbacks, paid
+requests, tokens and the flows used. The latest failures and fallbacks are
+listed last.
 
 <p align="center">
   <img src="docs/img/requests.png" alt="Requests view: traffic per model, output speed and time to first token over 24 hours" width="100%">
@@ -253,6 +268,8 @@ models:
     pool: [gpu0, gpu1]
     fallback: [ds-flash, codex-a]
     background_max_lanes: 1
+    limits:                     # this flow's own limits; the endpoint's are the defaults
+      codex-a: {max_concurrency: 2, rate_limit: 30}
 ```
 
 API keys come from `key_env` or `key_file`; avoid literal `key:` values. An

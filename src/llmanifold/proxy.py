@@ -566,9 +566,12 @@ class Core:
         def may_use(ep) -> bool:
             return not (ep.metered and not ctx.authed and not model.allow_metered_unauthenticated)
 
-        overflow = [(n, self.cfg.endpoints[n].overflow_at) for n in model.fallback
-                    if n in self.cfg.endpoints and self.cfg.endpoints[n].overflow_at
-                    and may_use(self.cfg.endpoints[n])]
+        def overflow_at(n: str) -> int | None:     # the flow's own setting, else the endpoint's
+            v = model.limit(n, "overflow_at")
+            return v if v is not None else self.cfg.endpoints[n].overflow_at
+
+        overflow = [(n, overflow_at(n)) for n in model.fallback
+                    if n in self.cfg.endpoints and overflow_at(n) and may_use(self.cfg.endpoints[n])]
         tried: set[str] = set()
         # 1. the pool (or, when the queue backs up, an overflow fallback)
         tried_pool = 0
@@ -619,7 +622,8 @@ class Core:
                 if not may_use(ep):
                     ctx.attempts.append({"endpoint": name, "skipped": "metered endpoint needs a token"})
                     continue
-                st = await self.router.try_endpoint(name, background=ctx.background, rid=ctx.rid, desc=desc)
+                st = await self.router.try_endpoint(name, background=ctx.background, rid=ctx.rid, desc=desc,
+                                                    flow=model)
                 if st is None:
                     ctx.attempts.append({"endpoint": name, "skipped": "busy or unhealthy"})
                     continue
@@ -805,7 +809,8 @@ class Core:
                                              strip_usage=ep.stream_usage and not ctx.include_usage)
                 parser = D.SSEParser()
                 held: list[bytes] = []
-                first_deadline = t0 + (ep.first_token_timeout or ctx.model.first_token_timeout)
+                first_deadline = t0 + (ctx.model.limit(ep.name, "first_token_timeout") or ep.first_token_timeout
+                                       or ctx.model.first_token_timeout)
                 ttft = None
                 seen = 0
                 it = resp.content.iter_any().__aiter__()

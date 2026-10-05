@@ -53,6 +53,7 @@ endpoints:
     metered: true            # costs money: fires the `metered` webhook when used
     fallback: true           # never a first choice
     overflow_at: 5           # also take requests once 5 are waiting for a lane (clears a backlog)
+    # rate_limit: 60         # requests started per minute; over it the endpoint counts as busy
     # json_schema: emulate   # response_format json_schema via JSON mode + a checked reply (default for DeepSeek)
     # reasoning_effort: low  # thinking level when the client names none: none minimal low medium high xhigh max
 
@@ -94,6 +95,8 @@ models:
     auth: open                           # open | token (people can change this in the admin site)
     input_modalities: [text, image]      # advertised in /v1/models
     allow_metered_unauthenticated: false # open callers don't get the metered fallback
+    limits:                              # this flow's own limits for its endpoints (default: the endpoint's)
+      deepseek: {max_concurrency: 4, rate_limit: 30, overflow_at: 3, first_token_timeout: 60}
 
   sonnet:
     pool: [claude]

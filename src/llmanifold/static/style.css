@@ -270,3 +270,8 @@ code { font-family: var(--mono); }
   .lane { grid-template-columns: 10px minmax(0, 1fr) auto; gap: 8px; }
   .lane .speed { display: none; }
 }
+
+/* requests per caller: a bar behind the count, scaled to the busiest caller */
+.share { display: inline-block; vertical-align: middle; width: 56px; height: 4px; margin-right: 8px;
+  background: linear-gradient(to right, var(--accent) var(--w), color-mix(in srgb, var(--dim2) 25%, transparent) var(--w)); }
+.lane-act button.set { color: var(--accent); border-color: var(--accent-dim); }

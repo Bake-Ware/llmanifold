@@ -5,7 +5,6 @@ from pathlib import Path
 import yaml
 
 POOL2 = {"a": {"kind": "openai"}, "b": {"kind": "openai"}}
-HUMAN = {"admin": {"local_humans": True}}
 
 
 def chat(model="qwen"):
@@ -16,15 +15,8 @@ def on_disk(s) -> dict:
     return yaml.safe_load(Path(s.core.cfg.path).read_text())
 
 
-async def test_edits_need_a_person(stack):
-    s = await stack(POOL2, {"qwen": {"pool": ["a"]}})
-    r = await s.admin.post("/api/flows/qwen/members", json={"endpoint": "b"})
-    assert r.status == 403
-    assert (await s.admin.post("/api/endpoints/a/pause")).status == 200      # pausing is fine for anyone
-
-
 async def test_add_endpoint_with_key_then_route_to_it(stack):
-    s = await stack(POOL2, {"qwen": {"pool": ["a"]}}, **HUMAN)
+    s = await stack(POOL2, {"qwen": {"pool": ["a"]}})
     url = s.core.cfg.endpoints["b"].url
     r = await s.admin.post("/api/endpoints", json={
         "name": "cloud", "url": url + "/v1", "model": "remote-name", "key": "sk-secret",
@@ -58,14 +50,14 @@ async def test_add_endpoint_with_key_then_route_to_it(stack):
 
 
 async def test_fallback_only_endpoint_cant_join_a_pool(stack):
-    s = await stack({**POOL2, "c": {"kind": "openai", "fallback": True}}, {"qwen": {"pool": ["a"]}}, **HUMAN)
+    s = await stack({**POOL2, "c": {"kind": "openai", "fallback": True}}, {"qwen": {"pool": ["a"]}})
     r = await s.admin.post("/api/flows/qwen/members", json={"endpoint": "c", "role": "pool"})
     assert r.status == 400 and "fallback-only" in (await r.json())["error"]
     assert on_disk(s)["models"]["qwen"]["pool"] == ["a"]                     # nothing written
 
 
 async def test_new_flow_remove_member_and_delete(stack):
-    s = await stack(POOL2, {"qwen": {"pool": ["a"]}}, **HUMAN)
+    s = await stack(POOL2, {"qwen": {"pool": ["a"]}})
     r = await s.admin.post("/api/flows", json={"name": "fast", "aliases": "quick, speedy", "pool": ["a", "b"]})
     assert r.status == 200, await r.text()
     assert (await s.api.post("/v1/chat/completions", json=chat("speedy"))).status == 200
@@ -78,13 +70,13 @@ async def test_new_flow_remove_member_and_delete(stack):
 
 
 async def test_new_flow_needs_a_model(stack):
-    s = await stack(POOL2, {"qwen": {"pool": ["a"]}}, **HUMAN)
+    s = await stack(POOL2, {"qwen": {"pool": ["a"]}})
     r = await s.admin.post("/api/flows", json={"name": "empty"})
     assert r.status == 400 and "needs a pool or a fallback" in (await r.json())["error"]
 
 
 async def test_remove_endpoint_in_use(stack):
-    s = await stack(POOL2, {"qwen": {"pool": ["a", "b"]}, "solo": {"pool": ["b"]}}, **HUMAN)
+    s = await stack(POOL2, {"qwen": {"pool": ["a", "b"]}, "solo": {"pool": ["b"]}})
     r = await s.admin.delete("/api/endpoints/a")
     assert r.status == 400 and "qwen" in (await r.json())["error"]
     assert (await s.admin.delete("/api/endpoints/a?force=1")).status == 200
@@ -94,19 +86,19 @@ async def test_remove_endpoint_in_use(stack):
 
 
 async def test_default_flow_cant_be_deleted(stack):
-    s = await stack(POOL2, {"qwen": {"pool": ["a"]}, "other": {"pool": ["b"]}}, default_model="qwen", **HUMAN)
+    s = await stack(POOL2, {"qwen": {"pool": ["a"]}, "other": {"pool": ["b"]}}, default_model="qwen")
     r = await s.admin.delete("/api/flows/qwen")
     assert r.status == 400 and "default" in (await r.json())["error"]
 
 
 async def test_bad_names_rejected(stack):
-    s = await stack(POOL2, {"qwen": {"pool": ["a"]}}, **HUMAN)
+    s = await stack(POOL2, {"qwen": {"pool": ["a"]}})
     r = await s.admin.post("/api/endpoints", json={"name": "has space", "url": "http://x"})
     assert r.status == 400
 
 
 async def test_edit_endpoint_keeps_key_unless_replaced(stack):
-    s = await stack(POOL2, {"qwen": {"pool": ["a"]}}, **HUMAN)
+    s = await stack(POOL2, {"qwen": {"pool": ["a"]}})
     await s.admin.put("/api/endpoints/b", json={"key": "k1"})
     await s.admin.put("/api/endpoints/b", json={"max_concurrency": 3})
     assert s.core.cfg.endpoints["b"].api_key() == "k1" and s.core.cfg.endpoints["b"].max_concurrency == 3
@@ -131,7 +123,7 @@ async def test_pause_survives_restart_and_reload(stack):
 
 
 async def test_test_endpoint_lists_models(stack):
-    s = await stack(POOL2, {"qwen": {"pool": ["a"]}}, **HUMAN)
+    s = await stack(POOL2, {"qwen": {"pool": ["a"]}})
     r = await s.admin.post("/api/test-endpoint", json={"url": s.core.cfg.endpoints["a"].url})
     j = await r.json()
     assert j["ok"] and j["models"] == ["fake"]
@@ -169,7 +161,7 @@ async def test_page_and_assets_are_cache_safe(stack):
 
 
 async def test_edits_keep_section_gaps_and_comments(stack):
-    s = await stack(POOL2, {"qwen": {"pool": ["a"]}}, **HUMAN)
+    s = await stack(POOL2, {"qwen": {"pool": ["a"]}})
     path = Path(s.core.cfg.path)
     text = path.read_text().replace("models:", "\nmodels:", 1).replace("pool:", "pool: # lanes\n   ", 0)
     path.write_text(text)

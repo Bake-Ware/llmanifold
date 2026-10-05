@@ -24,7 +24,7 @@
   const enc = encodeURIComponent;
 
   let status = null, who = null, cfg = null, view = 'overview', lastOk = 0;
-  const canEdit = () => !!(who && who.human && status && status.editable);
+  const canEdit = () => !!(status && status.editable);
 
   async function api(path, opts = {}) {
     const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
@@ -185,7 +185,7 @@
         <div class="lanes">${pool.map((e) => laneHtml(e, m.name, false)).join('')}${fb.map((e) => laneHtml(e, m.name, true)).join('')}
           ${!pool.length && !fb.length ? '<div class="empty">No models in this flow.</div>' : ''}</div>
       </div>`;
-    }).join('') || `<div class="panel empty">No alias flows yet. ${canEdit() ? 'Create one with “New alias flow”.' : 'A person signed in through the admin site can create one.'}</div>`;
+    }).join('') || `<div class="panel empty">No alias flows yet. ${canEdit() ? 'Create one with “New alias flow”.' : 'Add one to the config file.'}</div>`;
     $$('.model-row').forEach(drawPipes);
     $('#queue').innerHTML = s.queue.length
       ? s.queue.map((q) => `<div class="q"><span>${esc(q.model)}</span><span>${esc(q.priority)}</span><span>${q.waiting_s}s</span></div>`).join('')
@@ -453,7 +453,6 @@
     return out.join(' ');
   }
   async function renderAccess() {
-    const human = who && who.human;
     cfg = await api('/api/config');
     const live = Object.fromEntries(status.endpoints.map((e) => [e.name, e]));
     $('#endpoints tbody').innerHTML = Object.entries(cfg.endpoints).map(([n, sp]) => {
@@ -483,15 +482,9 @@
       <td class="chain wrap"><b>${esc(m.pool.join(', ') || '–')}</b>${m.fallback.length ? ` then ${esc(m.fallback.join(', '))}` : ''}</td>
       <td class="chain wrap">${m.fallback.length ? esc(m.fallback_on.join(', ')) : '–'}</td>
       <td><span class="seg" role="group" aria-label="Access for ${esc(m.name)}">
-        <button data-auth="${esc(m.name)}" data-mode="open" aria-pressed="${m.auth === 'open'}" ${human ? '' : 'disabled'}>Open</button>
-        <button data-auth="${esc(m.name)}" data-mode="token" aria-pressed="${m.auth === 'token'}" ${human ? '' : 'disabled'}>Token</button>
+        <button data-auth="${esc(m.name)}" data-mode="open" aria-pressed="${m.auth === 'open'}">Open</button>
+        <button data-auth="${esc(m.name)}" data-mode="token" aria-pressed="${m.auth === 'token'}">Token</button>
       </span>${m.warning ? `<div class="chain bad">${esc(m.warning)}</div>` : ''}</td></tr>`).join('');
-    const form = $('#token-form');
-    form.querySelectorAll('input, button').forEach((el) => (el.disabled = !human));
-    if (!human) {
-      $('#tokens tbody').innerHTML = '<tr><td colspan="7" class="empty">Sign in through the admin site to see and manage tokens.</td></tr>';
-      return;
-    }
     const toks = await api('/api/tokens');
     $('#tokens tbody').innerHTML = toks.map((t) => `<tr>
       <td><b>${esc(t.label)}</b></td><td class="mono">${esc(t.prefix)}…</td><td class="mono">${esc(t.models.join(', '))}</td>
@@ -848,11 +841,11 @@
       who = status.who;
       lastOk = Date.now();
       document.body.classList.toggle('can-edit', canEdit());
-      $('#who').textContent = who.human ? (who.email || 'signed in') : `view, pause and resume only (${who.ip})`;
+      $('#who').textContent = who.ip;
       $('#ver').textContent = 'v' + status.version;
       window.manifoldArt?.setLoad(status.endpoints.reduce((n, e) => n + (e.inflight || 0), 0));
       if (status.reload_error) banner('The config file has an error, so the previous config is still in use: ' + status.reload_error);
-      else if (who.human && !status.editable) banner('llmanifold can’t write its config file, so models and flows can only be changed by editing it.');
+      else if (!status.editable) banner('llmanifold can’t write its config file, so models and flows can only be changed by editing it.');
       if (!$$('dialog').some((d) => d.open)) await refreshView();
     } catch (e) {
       banner(e.message === 'forbidden' ? 'This address may not use the admin site.' : 'Lost contact with llmanifold: ' + e.message);

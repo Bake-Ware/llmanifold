@@ -127,12 +127,10 @@ either kind of upstream.
   `X-LLManifold-Priority: background` header) queue behind interactive ones and
   can be limited to N lanes per model.
 - **Tokens per model.** A model is `open` or needs a token. Tokens are created,
-  scoped and revoked by a person in the admin site; agents can read status and
-  drain endpoints, but can't mint tokens or change who needs one.
+  scoped and revoked in the admin site.
 - **Dashboard.** Live alias flows and lanes, charts of traffic, speed and
   time to first token (SQLite history, 30 days by default), and token
-  management, on a separate admin listener. People signed in through the admin
-  site can add, edit, pause and remove models (including paid APIs, with a
+  management, on a separate admin listener. From the admin site you can add, edit, pause and remove models (including paid APIs, with a
   connection test) and build alias flows; changes are written back to the YAML
   file with comments kept, and API keys go to files only llmanifold can read.
   Prometheus metrics at `/metrics`.
@@ -160,7 +158,7 @@ week, with the latest failures and fallbacks listed below.
 
 **Models and tokens** lists everything a request can be sent to, which flows are
 open and which need a token, and the tokens themselves. Tokens are created,
-scoped and revoked here by a person; agents can't mint them.
+scoped and revoked here.
 
 <p align="center">
   <img src="docs/img/models.png" alt="Models and tokens view: endpoints, per-flow access and tokens" width="100%">
@@ -236,10 +234,10 @@ didn't send itself.
 ### Admin access
 
 The admin listener only accepts addresses in `admin.allow_from` (loopback by
-default). To publish it, put an authenticating proxy in front and list the
-proxy in `admin.trusted_proxies`: requests from it must carry the signed-in
-user's email (`Cf-Access-Authenticated-User-Email` by default) and those users
-count as people, who can manage tokens. Keep the API and the admin site on
+default), and anyone it accepts has full control: editing models and flows,
+tokens and sign-ins. llmanifold does no login of its own, so to reach the
+dashboard from elsewhere, widen `allow_from` to a network you trust or put
+your own authenticating proxy in front. Keep the API and the admin site on
 separate hostnames if the proxy's login would get in the way of API clients.
 
 ## Command line

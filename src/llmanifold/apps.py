@@ -4,9 +4,7 @@
   compatibility endpoints. Safe to publish (e.g. through a public tunnel):
   nothing here can change state, and it never shows backend URLs.
 * Admin listener: dashboard, admin API and metrics. Every request is checked
-  against `admin.allow_from` / `admin.trusted_proxies`; token and model-auth
-  changes additionally need a *human*, i.e. a request a trusted proxy (such as
-  Cloudflare Access) vouches for with a user email.
+  against `admin.allow_from`; anyone allowed there has full control.
 """
 from __future__ import annotations
 
@@ -161,20 +159,9 @@ def build_api_app(core: Core) -> web.Application:
 # ======================================================================= admin listener
 
 def _who(request: web.Request, core: Core) -> dict | None:
-    """None = not allowed at all. Otherwise {human, email, ip}."""
-    a = core.cfg.admin
+    """None = not allowed at all. Otherwise {ip}."""
     ip = request.remote or ""
-    if a.trusted_proxies and a.ip_in(ip, a.trusted_proxies):
-        email = request.headers.get(a.human_header)
-        if not email:
-            return None          # through the proxy but not vouched for: refuse
-        if a.allowed_emails and email.lower() not in [e.lower() for e in a.allowed_emails]:
-            return None
-        return {"human": True, "email": email, "ip": ip}
-    if a.ip_in(ip, a.allow_from):
-        loopback = ip.startswith("127.") or ip == "::1"
-        return {"human": bool(a.local_humans and loopback), "email": None, "ip": ip}
-    return None
+    return {"ip": ip} if core.cfg.admin.ip_in(ip, core.cfg.admin.allow_from) else None
 
 
 @web.middleware
@@ -215,13 +202,6 @@ def _index_html() -> str:
             html = html.replace(f"/static/{name}", f"/static/{name}?v={fp}")
         _INDEX = (fp, html)
     return _INDEX[1]
-
-
-def _human(request: web.Request) -> web.Response | None:
-    if not request["who"]["human"]:
-        return web.json_response({"error": "this action needs a person signed in through the admin site"},
-                                 status=403)
-    return None
 
 
 async def a_index(request: web.Request) -> web.Response:
@@ -290,7 +270,7 @@ async def a_drain(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     on = request.match_info["action"] in ("drain", "pause")
     who = request["who"]
-    if not await core.set_paused(name, on, who.get("email") or who.get("ip")):
+    if not await core.set_paused(name, on, who["ip"]):
         return web.json_response({"error": f"unknown endpoint {name!r}"}, status=404)
     log.info("%s %s by %s", "pause" if on else "resume", name, who)
     return web.json_response({"ok": True, "endpoint": name, "draining": on, "paused": on})
@@ -323,8 +303,6 @@ async def a_config(request: web.Request) -> web.Response:
 
 
 async def _config_edit(request: web.Request, what: str, coro_fn) -> web.Response:
-    if (deny := _human(request)) is not None:
-        return deny
     core = request.app[CORE]
     if core.editor is None:
         return web.json_response({"error": "llmanifold wasn't started from a config file, so it can't save changes"},
@@ -336,7 +314,7 @@ async def _config_edit(request: web.Request, what: str, coro_fn) -> web.Response
     except OSError as e:
         return web.json_response({"error": f"couldn't write the config: {e}"}, status=500)
     core.apply_config(cfg)
-    log.info("config edit (%s) by %s", what, request["who"].get("email") or request["who"]["ip"])
+    log.info("config edit (%s) by %s", what, request["who"]["ip"])
     return web.json_response({"ok": True})
 
 
@@ -380,8 +358,6 @@ async def a_endpoint_delete(request: web.Request) -> web.Response:
 
 
 async def a_endpoint_test(request: web.Request) -> web.Response:
-    if (deny := _human(request)) is not None:
-        return deny
     core = request.app[CORE]
     b = await _body(request)
     url = str(b.get("url") or "").strip()
@@ -416,8 +392,6 @@ async def a_chatgpt_status(request: web.Request) -> web.Response:
 
 
 async def a_chatgpt_start(request: web.Request) -> web.Response:
-    if (deny := _human(request)) is not None:
-        return deny
     name, err = _chatgpt_endpoint(request)
     if err:
         return err
@@ -428,13 +402,11 @@ async def a_chatgpt_start(request: web.Request) -> web.Response:
         return web.json_response({"error": str(e)}, status=400)
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         return web.json_response({"error": f"couldn't reach OpenAI: {type(e).__name__}"}, status=502)
-    log.info("chatgpt sign-in started for %s by %s", name, request["who"].get("email"))
+    log.info("chatgpt sign-in started for %s by %s", name, request["who"]["ip"])
     return web.json_response(p)
 
 
 async def a_chatgpt_import(request: web.Request) -> web.Response:
-    if (deny := _human(request)) is not None:
-        return deny
     name, err = _chatgpt_endpoint(request)
     if err:
         return err
@@ -453,8 +425,6 @@ async def a_chatgpt_import(request: web.Request) -> web.Response:
 
 
 async def a_chatgpt_logout(request: web.Request) -> web.Response:
-    if (deny := _human(request)) is not None:
-        return deny
     name, err = _chatgpt_endpoint(request)
     if err:
         return err
@@ -514,14 +484,10 @@ async def a_reload(request: web.Request) -> web.Response:
 
 
 async def a_tokens(request: web.Request) -> web.Response:
-    if (deny := _human(request)) is not None:
-        return deny
     return web.json_response(await asyncio.to_thread(request.app[CORE].store.list_tokens))
 
 
 async def a_token_create(request: web.Request) -> web.Response:
-    if (deny := _human(request)) is not None:
-        return deny
     core = request.app[CORE]
     body = await request.json()
     label = str(body.get("label") or "").strip()
@@ -534,20 +500,16 @@ async def a_token_create(request: web.Request) -> web.Response:
     if bad:
         return web.json_response({"error": f"unknown models {bad}"}, status=400)
     tok = await asyncio.to_thread(core.store.create_token, label, models_, bool(body.get("background")),
-                                  request["who"].get("email") or request["who"]["ip"])
+                                  request["who"]["ip"])
     return web.json_response(tok)
 
 
 async def a_token_delete(request: web.Request) -> web.Response:
-    if (deny := _human(request)) is not None:
-        return deny
     ok = await asyncio.to_thread(request.app[CORE].store.delete_token, int(request.match_info["id"]))
     return web.json_response({"ok": ok}, status=200 if ok else 404)
 
 
 async def a_model_auth(request: web.Request) -> web.Response:
-    if (deny := _human(request)) is not None:
-        return deny
     core = request.app[CORE]
     name = request.match_info["name"]
     m = core.cfg.resolve(name)
@@ -557,7 +519,7 @@ async def a_model_auth(request: web.Request) -> web.Response:
     mode = body.get("mode")
     if mode not in ("open", "token", None):
         return web.json_response({"error": "mode must be open, token or null (use the config default)"}, status=400)
-    await asyncio.to_thread(core.store.set_auth, m.name, mode, request["who"].get("email"))
+    await asyncio.to_thread(core.store.set_auth, m.name, mode, request["who"]["ip"])
     return web.json_response({"ok": True, "model": m.name, "auth": core.effective_auth(m)})
 
 

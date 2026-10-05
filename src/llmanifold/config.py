@@ -20,6 +20,7 @@ PROBES = ("none", "models", "strata", "llamacpp")
 TRIGGERS = ("connect", "timeout", "slow", "5xx", "429", "4xx", "context", "empty", "schema", "queue")
 DEFAULT_TRIGGERS = ("connect", "timeout", "slow", "5xx", "429", "context", "empty", "schema", "queue")
 JSON_SCHEMA_MODES = ("native", "emulate")
+LEGACY_ADMIN_KEYS = ("trusted_proxies", "human_header", "allowed_emails", "local_humans")
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
@@ -104,12 +105,8 @@ class Webhook:
 
 @dataclass
 class Admin:
-    # Who may use the admin listener at all, and who counts as a human.
+    # Who may use the admin listener. Anyone allowed here has full control.
     allow_from: list[str] = field(default_factory=lambda: ["127.0.0.0/8", "::1/128"])
-    trusted_proxies: list[str] = field(default_factory=list)   # e.g. the cloudflared host
-    human_header: str = "Cf-Access-Authenticated-User-Email"
-    allowed_emails: list[str] = field(default_factory=list)    # empty: any email the proxy vouches for
-    local_humans: bool = False      # treat loopback callers as humans (token admin from the CLI)
 
     def _nets(self, items: list[str]):
         out = []
@@ -252,12 +249,13 @@ def parse(raw: dict[str, Any], path: str | None = None) -> Config:
         cfg.webhooks.append(Webhook(url=w["url"], headers=dict(w.get("headers") or {}),
                                     events=tuple(w.get("events") or ("metered",))))
 
-    a = raw.get("admin") or {}
+    a = dict(raw.get("admin") or {})
+    for old in LEGACY_ADMIN_KEYS:     # the auth-proxy settings are gone; older configs still load
+        a.pop(old, None)
     admin_keys = set(Admin.__dataclass_fields__)
     _take(dict(a), Admin, "admin", admin_keys, "section")
     cfg.admin = Admin(**a)
     cfg.admin._nets(cfg.admin.allow_from)
-    cfg.admin._nets(cfg.admin.trusted_proxies)
     return cfg
 
 

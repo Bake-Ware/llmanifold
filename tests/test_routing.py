@@ -308,29 +308,22 @@ async def test_admin_refuses_unlisted_networks(stack):
     assert (await s.admin.get("/api/status")).status == 403
 
 
-async def test_token_admin_needs_a_human(stack):
-    s = await stack(POOL2, {"qwen": {"pool": ["a", "b"]}})
-    r = await s.admin.post("/api/tokens", json={"label": "x"})
-    assert r.status == 403                      # a local agent can drain, not mint tokens
-    assert (await s.admin.post("/api/endpoints/a/drain")).status == 200
-
-
-async def test_human_through_trusted_proxy(stack):
-    s = await stack(POOL2, {"qwen": {"pool": ["a", "b"], "auth": "token"}},
-                    admin={"trusted_proxies": ["127.0.0.1/32"], "allowed_emails": ["me@example.com"]})
-    assert (await s.admin.get("/api/status")).status == 403          # proxy without an email: refused
-    h = {"Cf-Access-Authenticated-User-Email": "Me@Example.com"}
-    r = await s.admin.post("/api/tokens", json={"label": "home-agent", "models": "qwen"}, headers=h)
+async def test_admin_access_is_by_address(stack):
+    s = await stack(POOL2, {"qwen": {"pool": ["a", "b"], "auth": "token"}})
+    r = await s.admin.post("/api/tokens", json={"label": "home-agent", "models": "qwen"})
     tok = (await r.json())["token"]
     assert tok.startswith("llm_")
     r = await s.api.post("/v1/chat/completions", json=chat(), headers={"Authorization": f"Bearer {tok}"})
     assert r.status == 200
-    lst = await (await s.admin.get("/api/tokens", headers=h)).json()
+    lst = await (await s.admin.get("/api/tokens")).json()
     assert lst[0]["label"] == "home-agent" and "token" not in lst[0] and lst[0]["uses"] >= 0
-    r = await s.admin.post("/api/models/qwen/auth", json={"mode": "open"}, headers=h)
+    r = await s.admin.post("/api/models/qwen/auth", json={"mode": "open"})
     assert (await r.json())["auth"] == "open"
-    bad = {"Cf-Access-Authenticated-User-Email": "intruder@example.com"}
-    assert (await s.admin.get("/api/status", headers=bad)).status == 403
+
+
+async def test_admin_refuses_other_addresses(stack):
+    s = await stack(POOL2, {"qwen": {"pool": ["a", "b"]}}, admin={"allow_from": ["10.9.9.9/32"]})
+    assert (await s.admin.get("/api/status")).status == 403
 
 
 async def test_reload_and_metrics(stack, tmp_path):
@@ -501,3 +494,10 @@ async def test_status_reports_tokens_per_second(stack):
     st = await (await s.admin.get("/api/status")).json()
     assert st["tps"]["current"] > 0          # tokens streamed within the live window
     assert st["endpoints"][0]["tps_now"] > 0  # and per endpoint: what a lane running several requests shows
+
+
+def test_old_auth_proxy_keys_still_load():
+    from llmanifold.config import parse
+    cfg = parse({"endpoints": {"a": {"url": "http://x"}}, "models": {"m": {"pool": ["a"]}},
+                 "admin": {"trusted_proxies": ["10.0.0.1"], "human_header": "X", "local_humans": True}})
+    assert cfg.admin.allow_from == ["127.0.0.0/8", "::1/128"]

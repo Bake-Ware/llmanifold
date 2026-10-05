@@ -91,11 +91,6 @@ webhooks: []
 
 # ---------------------------------------------------------------- admin access
 admin:
-  allow_from: ["127.0.0.0/8", "::1/128"]   # who may reach the admin listener directly
-  # When the admin site sits behind an auth proxy (e.g. Cloudflare Access),
-  # list the proxy's address here. Requests from it must carry the signed-in
-  # user's email in `human_header`; those users can manage tokens and auth.
-  trusted_proxies: []
-  human_header: Cf-Access-Authenticated-User-Email
-  allowed_emails: []                   # empty: anyone the proxy vouches for
-  local_humans: false                  # true: loopback callers may manage tokens too
+  # Who may reach the admin listener. Anyone allowed here has full control:
+  # editing models and flows, tokens, sign-ins. Keep it to addresses you trust.
+  allow_from: ["127.0.0.0/8", "::1/128"]

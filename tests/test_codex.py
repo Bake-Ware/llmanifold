@@ -116,7 +116,7 @@ async def _setup(stack, aiohttp_server):
     s = await stack({"a": {"kind": "dead"},
                      "codex": {"kind": "dead", "url": base + "/backend-api/codex", "dialect": "responses",
                                "login": "chatgpt", "model": "gpt-5.5", "fallback": True}},
-                    {"qwen": {"pool": ["a"], "fallback": ["codex"]}}, admin={"local_humans": True})
+                    {"qwen": {"pool": ["a"], "fallback": ["codex"]}})
     s.core.chatgpt.issuer = base
     return s, fake, base
 

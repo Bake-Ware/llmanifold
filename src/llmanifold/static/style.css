@@ -104,6 +104,7 @@ main { position: relative; z-index: 1; margin-left: var(--side-w); padding: 0 28
 .lane .ln { font: 500 13px var(--sans); overflow-wrap: anywhere; }
 .lane .ln .left { margin-left: 8px; font: 400 10px var(--mono); color: var(--accent); white-space: nowrap; }
 #model-pick { margin-top: 6px; }
+.lane .ln .asks { margin-left: 2px; font-weight: 400; color: var(--dim); }
 .lane .ln small { display: block; font: 10px var(--mono); color: var(--dim2); font-weight: 400; }
 .lane .now { font: 11px var(--mono); color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lane.busy .now { color: var(--fg); }

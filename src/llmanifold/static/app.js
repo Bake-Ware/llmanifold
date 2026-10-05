@@ -127,7 +127,7 @@
       aria-label="Remove ${esc(e.name)} from ${esc(flow)}" title="Remove from this flow">✕</button>`;
     return `<div class="lane ${st} ${fallback ? 'fallback' : ''}" data-lane="${esc(e.name)}">
       <span class="st" title="${st}"></span>
-      <span class="ln">${esc(e.name)}${left ? `<em class="left">${esc(left)}</em>` : ''}<small>${esc(tags || `${e.inflight}/${e.max_concurrency} in use`)}</small></span>
+      <span class="ln">${esc(e.name)}<span class="asks" title="${e.model ? 'Model name sent to this engine' : 'Sends the name the client asked for'}">(${esc(e.model || flow)})</span>${left ? `<em class="left">${esc(left)}</em>` : ''}<small>${esc(tags || `${e.inflight}/${e.max_concurrency} in use`)}</small></span>
       <span class="now" title="${esc(laneNow(e, st))}">${esc(laneNow(e, st))}</span>
       ${e.inflight > 1 && e.tps_now
     ? `<span class="speed" title="All ${e.inflight} requests running on this model, added together${e.tps ? `; about ${e.tps} t/s each` : ''}">${e.tps_now.toFixed(1)} t/s<small>total of ${e.inflight}</small></span>`

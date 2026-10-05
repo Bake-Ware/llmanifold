@@ -452,28 +452,46 @@
     if (spec.dialect === 'anthropic') out.push('<span class="chip">anthropic api</span>');
     return out.join(' ');
   }
+  function signinCell(c) {
+    return c && c.signed_in
+      ? `ChatGPT${c.email ? ': ' + esc(c.email) : ''}${c.plan ? ' (' + esc(c.plan) + ')' : ''}${c.last_error ? '<div class="bad">' + esc(c.last_error) + '</div>' : ''}`
+      : '<span class="bad">not signed in</span>';
+  }
+  function signinButtons(name, kind, c) {
+    return c && c.signed_in
+      ? `<button class="small ghost edit-only" data-signout="${esc(name)}" data-kind="${kind}">Sign out</button>`
+      : `<button class="small edit-only" data-signin="${esc(name)}" data-kind="${kind}">Sign in</button>`;
+  }
   async function renderAccess() {
     cfg = await api('/api/config');
     const live = Object.fromEntries(status.endpoints.map((e) => [e.name, e]));
+    $('#providers tbody').innerHTML = Object.entries(cfg.providers || {}).map(([n, pv]) => `<tr>
+        <td class="wrap"><b>${esc(n)}</b><div class="chain">${esc(pv.url)}</div></td>
+        <td>${pv.metered ? '<span class="chip warn">paid</span>' : '<span class="chip">free</span>'}${pv.dialect === 'anthropic' ? ' <span class="chip">anthropic api</span>' : ''}</td>
+        <td class="mono">${pv.login === 'chatgpt' ? signinCell(pv.chatgpt) : pv.key_set ? 'set' : '<span class="bad">missing</span>'}</td>
+        <td class="mono">${pv.max_concurrency ? `${pv.inflight}/${pv.max_concurrency}` : `${pv.inflight} · no limit`}</td>
+        <td class="chain wrap">${pv.endpoints.length ? esc(pv.endpoints.join(', ')) : 'none yet'}</td>
+        <td class="actions">
+          <button class="small edit-only" data-add-from="${esc(n)}">Add model</button>
+          ${pv.login === 'chatgpt' ? signinButtons(n, 'providers', pv.chatgpt) : ''}
+          <button class="small secondary edit-only" data-edit-provider="${esc(n)}">Edit</button>
+          <button class="small ghost edit-only" data-delete-provider="${esc(n)}">Remove</button></td></tr>`).join('')
+      || '<tr><td colspan="6" class="empty">No providers yet. Add one to use a paid API or a ChatGPT plan for several models with one key or sign-in.</td></tr>';
     $('#endpoints tbody').innerHTML = Object.entries(cfg.endpoints).map(([n, sp]) => {
       const e = live[n] || {};
       const st = e.name ? laneState(e) : 'unknown';
       return `<tr>
-        <td class="wrap"><b>${esc(n)}</b><div class="chain">${esc(sp.url)}</div></td>
+        <td class="wrap"><b>${esc(n)}</b><div class="chain">${sp.provider ? 'from ' + esc(sp.provider) : esc(sp.url)}</div></td>
         <td class="mono">${esc(sp.model || 'client’s name')}</td>
         <td>${epKind(sp)}</td>
         <td><span class="state ${st}"><span class="st"></span>${st}</span></td>
         <td class="chain wrap">${sp.flows.length ? esc(sp.flows.join(', ')) : 'no flows'}</td>
-        <td class="mono">${sp.login === 'chatgpt'
-          ? (sp.chatgpt && sp.chatgpt.signed_in
-            ? `ChatGPT${sp.chatgpt.email ? ': ' + esc(sp.chatgpt.email) : ''}${sp.chatgpt.plan ? ' (' + esc(sp.chatgpt.plan) + ')' : ''}${sp.chatgpt.last_error ? '<div class="bad">' + esc(sp.chatgpt.last_error) + '</div>' : ''}`
-            : '<span class="bad">not signed in</span>')
+        <td class="mono">${sp.provider ? `<span class="muted">${esc(sp.provider)}’s</span>`
+          : sp.login === 'chatgpt' ? signinCell(sp.chatgpt)
           : sp.key_set ? 'set' : sp.metered ? '<span class="bad">missing</span>' : '–'}</td>
         <td class="actions">
           ${e.draining ? `<button class="small" data-resume="${esc(n)}">Resume</button>` : `<button class="small secondary" data-pause="${esc(n)}">Pause</button>`}
-          ${sp.login === 'chatgpt' ? (sp.chatgpt && sp.chatgpt.signed_in
-            ? `<button class="small ghost edit-only" data-signout="${esc(n)}">Sign out</button>`
-            : `<button class="small edit-only" data-signin="${esc(n)}">Sign in</button>`) : ''}
+          ${sp.login === 'chatgpt' && !sp.provider ? signinButtons(n, 'endpoints', sp.chatgpt) : ''}
           <button class="small secondary edit-only" data-edit-model="${esc(n)}">Edit</button>
           <button class="small ghost edit-only" data-delete-model="${esc(n)}">Remove</button></td></tr>`;
     }).join('') || '<tr><td colspan="7" class="empty">No models yet. Add one to start routing.</td></tr>';
@@ -513,41 +531,65 @@
     syncLogin();
   }
   function syncLogin() {
-    const f = $('#model-form'), resp = f.elements.dialect.value === 'responses';
+    const f = $('#model-form'), via = f.elements.provider.value, resp = f.elements.dialect.value === 'responses';
     if (!resp) f.elements.login.value = '';
     const chatgpt = f.elements.login.value === 'chatgpt';
+    $$('.own-conn', f).forEach((el) => { el.hidden = !!via; });
+    f.elements.url.required = !via;
+    $('#from-hint').hidden = !via;
+    if (via) return;
+    $('#preset-field').hidden = !!editing;
     $('#login-field').hidden = !resp;
     $('#login-hint').hidden = !chatgpt;
     $('#key-field').hidden = chatgpt;
+    $('.clear-key', f).hidden = !(editing && cfg && cfg.endpoints[editing] && cfg.endpoints[editing].key === 'file');
+  }
+  $('#model-form').elements.provider.addEventListener('change', () => {
+    syncLogin();
+    offerModels([]);
+    listProviderModels();
+  });
+  function listProviderModels() {
+    const f = $('#model-form'), via = f.elements.provider.value;
+    if (!via) return;
+    api(`/api/providers/${enc(via)}/models`)
+      .then((r) => { if (r.ok && f.elements.provider.value === via) offerModels(r.models); }).catch(() => {});
   }
   $('#model-form').elements.dialect.addEventListener('change', syncLogin);
   $('#model-form').elements.login.addEventListener('change', syncLogin);
-  async function openModelDialog(name) {
+  async function openModelDialog(name, from) {
     const f = $('#model-form');
     f.reset();
+    cfg = await api('/api/config');
+    f.elements.provider.innerHTML = '<option value="">Its own address (an engine, or an API used only here)</option>'
+      + Object.keys(cfg.providers || {}).map((p) => `<option value="${esc(p)}">${esc(p)} (provider)</option>`).join('');
     formError(f, '');
     $('#test-result').textContent = '';
     offerModels([]);
     editing = name || null;
     $('#model-title').textContent = name ? `Edit ${name}` : 'Add a model';
     $('#model-save').textContent = name ? 'Save changes' : 'Add model';
-    $('#preset-field').hidden = !!name;
     f.elements.name.readOnly = !!name;
-    $('.clear-key', f).hidden = true;
     if (name) {
-      cfg = await api('/api/config');
       const sp = cfg.endpoints[name];
+      f.elements.provider.value = sp.provider || '';
       fillModelForm({ name, ...sp, context: sp.context || '', overflow_at: sp.overflow_at || '', login: sp.login || '',
         first_token_timeout: sp.first_token_timeout || '', reasoning_effort: sp.reasoning_effort || '',
         service_tier: sp.service_tier || '' });
       f.elements.key.placeholder = sp.key_set ? 'saved; leave blank to keep it' : 'sk-…';
-      $('.clear-key', f).hidden = sp.key !== 'file';
     } else {
       fillModelForm({ overflow_at: '', login: '', first_token_timeout: '', reasoning_effort: '', service_tier: '', ...PRESETS.local });
       f.elements.key.placeholder = 'sk-…';
+      if (from) {
+        const pv = cfg.providers[from];
+        f.elements.provider.value = from;
+        fillModelForm({ name: '', model: '', fallback: pv.metered, max_concurrency: pv.max_concurrency || 4, probe: pv.probe });
+      }
     }
+    syncLogin();
     $('#model-dialog').showModal();
-    if (name) {   // a saved model: list what its API offers straight away, so the name can be picked
+    if (f.elements.provider.value) listProviderModels();
+    else if (name) {   // a saved model: list what its API offers straight away, so the name can be picked
       post('/api/test-endpoint', { url: f.elements.url.value, dialect: f.elements.dialect.value, key: '', name,
         login: f.elements.login.value || null })
         .then((r) => { if (r.ok && editing === name) offerModels(r.models); }).catch(() => {});
@@ -570,8 +612,9 @@
     out.className = 'muted small';
     out.textContent = 'Testing…';
     try {
-      const r = await post('/api/test-endpoint', { url: f.elements.url.value, dialect: f.elements.dialect.value,
-        key: f.elements.key.value, name: editing, login: f.elements.login.value || null });
+      const r = await post('/api/test-endpoint', { url: f.elements.url.value || 'x', dialect: f.elements.dialect.value,
+        key: f.elements.key.value, name: editing, login: f.elements.login.value || null,
+        provider: f.elements.provider.value || null });
       if (r.ok) {
         out.className = 'small ok';
         out.textContent = `Connected in ${r.ms} ms. ${r.models.length ? `It offers ${r.models.length} model${r.models.length === 1 ? '' : 's'}; pick one below.` : 'It didn’t list any models.'}`;
@@ -585,7 +628,7 @@
   });
   $('#model-form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
-    const f = ev.target, el = f.elements;
+    const f = ev.target, el = f.elements, via = el.provider.value || null;
     const body = {
       url: el.url.value.trim(), dialect: el.dialect.value, model: el.model.value.trim() || null,
       max_concurrency: Number(el.max_concurrency.value) || 1, context: el.context.value ? Number(el.context.value) : null,
@@ -595,8 +638,14 @@
       first_token_timeout: el.first_token_timeout.value ? Number(el.first_token_timeout.value) : null,
       reasoning_effort: el.reasoning_effort.value || null, service_tier: el.service_tier.value.trim() || null,
     };
-    if (el.key.value.trim()) body.key = el.key.value.trim();
-    if (editing && el.clear_key.checked) body.clear_key = true;
+    if (via) {     // the connection, health check and cost come from the provider
+      for (const k of ['url', 'dialect', 'login', 'probe', 'metered']) delete body[k];
+      body.provider = via;
+    } else {
+      body.provider = null;
+      if (el.key.value.trim()) body.key = el.key.value.trim();
+      if (editing && el.clear_key.checked) body.clear_key = true;
+    }
     try {
       const name = editing || el.name.value.trim();
       if (editing) await post(`/api/endpoints/${enc(editing)}`, body, 'PUT');
@@ -605,10 +654,99 @@
       await tick();
       if (body.login === 'chatgpt') {
         const st = await api(`/api/endpoints/${enc(name)}/chatgpt`).catch(() => null);
-        if (st && !st.signed_in) await openSignin(name);
+        if (st && !st.signed_in) await openSignin(name, 'endpoints');
       }
     } catch (e) { formError(f, e.message); }
   });
+
+  // ------------------------------------------------------------- provider dialog (add / edit)
+  const PV_PRESETS = {
+    codex: { name: 'codex', url: 'https://chatgpt.com/backend-api/codex', dialect: 'responses', login: 'chatgpt', probe: 'none', metered: true },
+    deepseek: { name: 'deepseek', url: 'https://api.deepseek.com', dialect: 'openai', login: '', probe: 'models', metered: true },
+    anthropic: { name: 'anthropic', url: 'https://api.anthropic.com', dialect: 'anthropic', login: '', probe: 'none', metered: true },
+    openai: { name: 'openai', url: 'https://api.openai.com', dialect: 'openai', login: '', probe: 'models', metered: true },
+    openrouter: { name: 'openrouter', url: 'https://openrouter.ai/api', dialect: 'openai', login: '', probe: 'models', metered: true },
+    other: { name: '', url: 'https://', dialect: 'openai', login: '', probe: 'models', metered: true },
+  };
+  let editingProvider = null;
+  function fillProviderForm(v) {
+    const f = $('#provider-form');
+    for (const k of ['name', 'url', 'dialect', 'login', 'max_concurrency', 'probe']) if (k in v) f.elements[k].value = v[k] ?? '';
+    if ('metered' in v) f.elements.metered.checked = !!v.metered;
+    syncProviderLogin();
+  }
+  function syncProviderLogin() {
+    const f = $('#provider-form'), resp = f.elements.dialect.value === 'responses';
+    if (!resp) f.elements.login.value = '';
+    const chatgpt = f.elements.login.value === 'chatgpt';
+    $('#pv-login-field').hidden = !resp;
+    $('#pv-login-hint').hidden = !chatgpt;
+    $('#pv-key-field').hidden = chatgpt;
+  }
+  $('#provider-form').elements.dialect.addEventListener('change', syncProviderLogin);
+  $('#provider-form').elements.login.addEventListener('change', syncProviderLogin);
+  $('#provider-form').elements.preset.addEventListener('change', (ev) => {
+    if (!editingProvider) fillProviderForm({ max_concurrency: '', ...PV_PRESETS[ev.target.value] });
+  });
+  async function openProviderDialog(name) {
+    const f = $('#provider-form');
+    f.reset();
+    formError(f, '');
+    $('#pv-test-result').textContent = '';
+    editingProvider = name || null;
+    $('#provider-title').textContent = name ? `Edit ${name}` : 'Add a provider';
+    $('#provider-save').textContent = name ? 'Save changes' : 'Add provider';
+    $('#pv-preset-field').hidden = !!name;
+    f.elements.name.readOnly = !!name;
+    $('.pv-clear-key', f).hidden = true;
+    if (name) {
+      cfg = await api('/api/config');
+      const pv = cfg.providers[name];
+      fillProviderForm({ name, ...pv, login: pv.login || '', max_concurrency: pv.max_concurrency || '' });
+      f.elements.key.placeholder = pv.key_set ? 'saved; leave blank to keep it' : 'sk-…';
+      $('.pv-clear-key', f).hidden = pv.key !== 'file';
+    } else {
+      fillProviderForm({ max_concurrency: '', ...PV_PRESETS.codex });
+      f.elements.key.placeholder = 'sk-…';
+    }
+    $('#provider-dialog').showModal();
+  }
+  $('#test-provider').addEventListener('click', async () => {
+    const f = $('#provider-form'), out = $('#pv-test-result');
+    out.className = 'muted small';
+    out.textContent = 'Testing…';
+    try {
+      const r = await post('/api/test-endpoint', { url: f.elements.url.value, dialect: f.elements.dialect.value,
+        key: f.elements.key.value, name: editingProvider, login: f.elements.login.value || null, provider_form: true });
+      out.className = r.ok ? 'small ok' : 'small bad';
+      out.textContent = r.ok
+        ? `Connected in ${r.ms} ms. ${r.models.length ? `It offers ${r.models.length} model${r.models.length === 1 ? '' : 's'}.` : 'It didn’t list any models.'}`
+        : `Couldn’t connect: ${r.error}`;
+    } catch (e) { out.className = 'small bad'; out.textContent = e.message; }
+  });
+  $('#provider-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const f = ev.target, el = f.elements;
+    const body = {
+      url: el.url.value.trim(), dialect: el.dialect.value, login: el.login.value || null,
+      max_concurrency: el.max_concurrency.value ? Number(el.max_concurrency.value) : null,
+      probe: el.probe.value, metered: el.metered.checked,
+    };
+    if (el.key.value.trim() && !body.login) body.key = el.key.value.trim();
+    if (editingProvider && el.clear_key.checked) body.clear_key = true;
+    try {
+      const name = editingProvider || el.name.value.trim();
+      if (editingProvider) await post(`/api/providers/${enc(editingProvider)}`, body, 'PUT');
+      else await post('/api/providers', { name, ...body });
+      $('#provider-dialog').close();
+      await tick();
+      if (body.login === 'chatgpt') {
+        const st = await api(`/api/providers/${enc(name)}/chatgpt`).catch(() => null);
+        if (st && !st.signed_in) await openSignin(name, 'providers');
+      }
+    } catch (e) { formError(f, e.message); }
+  });
+  $('#add-provider').addEventListener('click', () => openProviderDialog(null).catch((e) => banner(e.message)));
 
   // ------------------------------------------------------------- flow dialogs
   function openMemberDialog(flow) {
@@ -679,16 +817,17 @@
 
   // ------------------------------------------------------------- ChatGPT sign-in
   let signinTimer = 0;
-  async function openSignin(name) {
-    const dlg = $('#signin-dialog'), box = $('.signin', dlg);
+  async function openSignin(name, kind = 'endpoints') {
+    const dlg = $('#signin-dialog'), box = $('.signin', dlg), base = `/api/${kind}/${enc(name)}/chatgpt`;
     $('#signin-model').textContent = name;
     $('#signin-json').value = '';
     formError(box, '');
     dlg.dataset.name = name;
+    dlg.dataset.base = base;
     $('#signin-body').innerHTML = '<p class="muted">Asking OpenAI for a sign-in code…</p>';
     dlg.showModal();
     try {
-      const p = await post(`/api/endpoints/${enc(name)}/chatgpt/start`);
+      const p = await post(`${base}/start`);
       $('#signin-body').innerHTML = `<ol class="steps">
         <li>Open <a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url.replace(/^https:\/\//, ''))}</a> and sign in to the ChatGPT account whose plan should serve requests.</li>
         <li>Enter this code: <code class="user-code">${esc(p.user_code)}</code></li></ol>
@@ -701,7 +840,7 @@
     clearInterval(signinTimer);
     signinTimer = setInterval(async () => {
       if (!dlg.open) { clearInterval(signinTimer); return; }
-      const st = await api(`/api/endpoints/${enc(name)}/chatgpt`).catch(() => null);
+      const st = await api(base).catch(() => null);
       if (!st) return;
       if (st.signed_in && (!st.pending || st.pending.state === 'done')) {
         clearInterval(signinTimer);
@@ -717,7 +856,7 @@
   $('#signin-import').addEventListener('click', async () => {
     const dlg = $('#signin-dialog'), box = $('.signin', dlg), name = dlg.dataset.name;
     try {
-      const st = await post(`/api/endpoints/${enc(name)}/chatgpt/import`, { auth_json: $('#signin-json').value });
+      const st = await post(`${dlg.dataset.base}/import`, { auth_json: $('#signin-json').value });
       clearInterval(signinTimer);
       formError(box, '');
       $('#signin-json').value = '';
@@ -777,11 +916,21 @@
       } else if (d.resume) {
         await post(`/api/endpoints/${enc(d.resume)}/resume`);
       } else if (d.signin) {
-        await openSignin(d.signin);
+        await openSignin(d.signin, d.kind || 'endpoints');
         return;
       } else if (d.signout) {
-        if (!(await confirmAction(`Sign ${d.signout} out of ChatGPT?`, 'llmanifold forgets the ChatGPT sign-in for this model. Flows using it skip it until someone signs in again.', 'Sign out', true))) return;
-        await api(`/api/endpoints/${enc(d.signout)}/chatgpt`, { method: 'DELETE' });
+        const whose = d.kind === 'providers' ? 'this provider; every model from it stops' : 'this model; flows using it skip it';
+        if (!(await confirmAction(`Sign ${d.signout} out of ChatGPT?`, `llmanifold forgets the ChatGPT sign-in for ${whose} until someone signs in again.`, 'Sign out', true))) return;
+        await api(`/api/${d.kind || 'endpoints'}/${enc(d.signout)}/chatgpt`, { method: 'DELETE' });
+      } else if (d.addFrom) {
+        await openModelDialog(null, d.addFrom);
+        return;
+      } else if (d.editProvider) {
+        await openProviderDialog(d.editProvider);
+        return;
+      } else if (d.deleteProvider) {
+        if (!(await confirmAction(`Remove the ${d.deleteProvider} provider?`, 'llmanifold forgets its address and saved key. Models that come from it must be removed or moved first.', 'Remove', true))) return;
+        await api(`/api/providers/${enc(d.deleteProvider)}`, { method: 'DELETE' });
       } else if (d.flowSettings) {
         await openSettingsDialog(d.flowSettings);
         return;

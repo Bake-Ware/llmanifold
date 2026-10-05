@@ -195,7 +195,7 @@ class Stack:
 
 @pytest.fixture
 async def stack(aiohttp_server, aiohttp_client, tmp_path):
-    """make(endpoints={name: {"kind": "openai"|"anthropic"|"dead", **endpoint cfg}}, models={...}, **top)"""
+    """make(endpoints={name: {"kind": "openai"|"anthropic"|"dead"|"raw", **endpoint cfg}}, models={...}, **top)"""
     made = []
 
     async def make(endpoints: dict, models: dict, **top) -> Stack:
@@ -204,6 +204,9 @@ async def stack(aiohttp_server, aiohttp_client, tmp_path):
         for name, spec in endpoints.items():
             spec = dict(spec)
             kind = spec.pop("kind", "openai")
+            if kind == "raw":          # exactly as given (e.g. one that takes its connection from a provider)
+                eps[name] = spec
+                continue
             if kind == "dead":
                 eps[name] = {"url": "http://127.0.0.1:9", "probe": "none", **spec}
                 continue

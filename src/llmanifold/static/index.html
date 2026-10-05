@@ -75,6 +75,18 @@
   <section class="view" id="view-access" hidden>
     <section class="panel">
       <div class="panel-head">
+        <h2>Providers</h2>
+        <button class="edit-only" id="add-provider">Add provider</button>
+      </div>
+      <p class="muted">An account with a remote API: its address and key, or a ChatGPT sign-in. Connect it once,
+        then add as many models from it as you like.</p>
+      <div class="table-wrap"><table class="grid" id="providers">
+        <thead><tr><th>Provider</th><th>Kind</th><th>Key or sign-in</th><th>At once</th><th>Models</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head">
         <h2>Models</h2>
         <button class="edit-only" id="add-model">Add model</button>
       </div>
@@ -169,7 +181,10 @@
 <dialog id="model-dialog" class="confirm form-dialog wide">
   <form id="model-form" autocomplete="off">
     <h2 id="model-title">Add a model</h2>
-    <label class="field" id="preset-field">Start from
+    <label class="field" id="from-field">Comes from
+      <select name="provider"><option value="">Its own address (an engine, or an API used only here)</option></select>
+    </label>
+    <label class="field own-conn" id="preset-field">Start from
       <select name="preset">
         <option value="local">An engine on your network (llama.cpp, Strata, vLLM…)</option>
         <option value="deepseek">DeepSeek API</option>
@@ -184,23 +199,24 @@
       <label class="field">Name in llmanifold
         <input name="name" required placeholder="strata-a" pattern="[A-Za-z0-9][A-Za-z0-9._:@+\-]*">
       </label>
-      <label class="field">API type
+      <label class="field own-conn">API type
         <select name="dialect"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option>
           <option value="responses">OpenAI Responses (Codex)</option></select>
       </label>
     </div>
-    <label class="field">Base URL
+    <label class="field own-conn">Base URL
       <input name="url" required placeholder="http://127.0.0.1:8080" inputmode="url">
     </label>
-    <label class="field" id="login-field" hidden>Sign in with
+    <label class="field own-conn" id="login-field" hidden>Sign in with
       <select name="login"><option value="">An API key</option><option value="chatgpt">A ChatGPT account (Codex)</option></select>
     </label>
-    <p class="muted small" id="login-hint" hidden>After saving, use <b>Sign in</b> on this model to connect your ChatGPT account.
+    <p class="muted small own-conn" id="login-hint" hidden>After saving, use <b>Sign in</b> on this model to connect your ChatGPT account.
       Requests then count against your ChatGPT plan's Codex limits.</p>
-    <label class="field" id="key-field">API key <span class="opt" id="key-hint">only for paid APIs; stored in a file only llmanifold can read</span>
+    <label class="field own-conn" id="key-field">API key <span class="opt" id="key-hint">only for paid APIs; stored in a file only llmanifold can read</span>
       <input name="key" type="password" autocomplete="new-password" placeholder="sk-…">
     </label>
-    <label class="check clear-key" hidden><input type="checkbox" name="clear_key"> Remove the saved key</label>
+    <label class="check clear-key own-conn" hidden><input type="checkbox" name="clear_key"> Remove the saved key</label>
+    <p class="muted small" id="from-hint" hidden>Address, key or sign-in, health check and cost come from the provider.</p>
     <div class="test-row">
       <button type="button" class="secondary" id="test-model">Test connection</button>
       <span id="test-result" class="muted small"></span>
@@ -218,7 +234,7 @@
       <label class="field">Context window <span class="opt">tokens, optional</span>
         <input name="context" type="number" min="0" step="1024" placeholder="262144">
       </label>
-      <label class="field">Health check
+      <label class="field own-conn">Health check
         <select name="probe">
           <option value="models">List models (any API)</option>
           <option value="llamacpp">llama.cpp slots (also sees busy)</option>
@@ -227,7 +243,7 @@
         </select>
       </label>
     </div>
-    <label class="check"><input type="checkbox" name="metered"> Costs money per request
+    <label class="check own-conn"><input type="checkbox" name="metered"> Costs money per request
       <span class="opt">anonymous callers won't fall back to it unless a flow allows that</span></label>
     <label class="check"><input type="checkbox" name="fallback"> Only use as a fallback</label>
     <div class="row2">
@@ -257,6 +273,65 @@
     <div class="dialog-actions">
       <button type="button" class="secondary" data-close>Cancel</button>
       <button type="submit" id="model-save">Add model</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="provider-dialog" class="confirm form-dialog wide">
+  <form id="provider-form" autocomplete="off">
+    <h2 id="provider-title">Add a provider</h2>
+    <label class="field" id="pv-preset-field">Start from
+      <select name="preset">
+        <option value="codex">ChatGPT plan, via Codex (sign in with ChatGPT)</option>
+        <option value="deepseek">DeepSeek API</option>
+        <option value="anthropic">Anthropic API</option>
+        <option value="openai">OpenAI API</option>
+        <option value="openrouter">OpenRouter</option>
+        <option value="other">Another OpenAI-compatible API</option>
+      </select>
+    </label>
+    <div class="row2">
+      <label class="field">Name in llmanifold
+        <input name="name" required placeholder="codex" pattern="[A-Za-z0-9][A-Za-z0-9._:@+\-]*">
+      </label>
+      <label class="field">API type
+        <select name="dialect"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option>
+          <option value="responses">OpenAI Responses (Codex)</option></select>
+      </label>
+    </div>
+    <label class="field">Base URL
+      <input name="url" required placeholder="https://api.example.com" inputmode="url">
+    </label>
+    <label class="field" id="pv-login-field" hidden>Sign in with
+      <select name="login"><option value="">An API key</option><option value="chatgpt">A ChatGPT account (Codex)</option></select>
+    </label>
+    <p class="muted small" id="pv-login-hint" hidden>After saving you'll be asked to sign in to ChatGPT. Every model
+      from this provider then uses that one sign-in, and requests count against the plan's Codex limits.</p>
+    <label class="field" id="pv-key-field">API key <span class="opt">stored in a file only llmanifold can read</span>
+      <input name="key" type="password" autocomplete="new-password" placeholder="sk-…">
+    </label>
+    <label class="check pv-clear-key" hidden><input type="checkbox" name="clear_key"> Remove the saved key</label>
+    <div class="test-row">
+      <button type="button" class="secondary" id="test-provider">Test connection</button>
+      <span id="pv-test-result" class="muted small"></span>
+    </div>
+    <div class="row2">
+      <label class="field">Requests at once, across its models <span class="opt">blank: no shared limit</span>
+        <input name="max_concurrency" type="number" min="1" max="1024" placeholder="no limit">
+      </label>
+      <label class="field">Health check
+        <select name="probe">
+          <option value="none">None</option>
+          <option value="models">List models</option>
+        </select>
+      </label>
+    </div>
+    <label class="check"><input type="checkbox" name="metered" checked> Costs money per request
+      <span class="opt">its models count as paid unless a model says otherwise</span></label>
+    <p class="form-error" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" data-close>Cancel</button>
+      <button type="submit" id="provider-save">Add provider</button>
     </div>
   </form>
 </dialog>

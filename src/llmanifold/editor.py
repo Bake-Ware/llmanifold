@@ -7,7 +7,8 @@ survive. Each write is validated with the normal config parser before it
 replaces the file, and the previous version is kept as `<file>.bak-<time>`.
 
 API keys typed into the admin site never go into the YAML: they are written to
-`<data_dir>/keys/<endpoint>.key` (mode 600) and the endpoint gets `key_file`.
+`<data_dir>/keys/<endpoint>.key` or `provider-<provider>.key` (mode 600) and the
+entry gets `key_file`.
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.tokens import CommentToken
 
-from .config import DIALECTS, PROBES, Config, ConfigError, parse
+from .config import CONNECTION_FIELDS, DIALECTS, PROBES, Config, ConfigError, parse
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,99}$")
 KEEP_BACKUPS = 20
@@ -33,7 +34,9 @@ KEEP_BACKUPS = 20
 # fields the admin site may set, in the order they're written for a new entry
 ENDPOINT_FIELDS = ("url", "dialect", "login", "model", "max_concurrency", "context", "probe", "metered", "fallback",
                    "overflow_at", "first_token_timeout", "timeout", "connect_timeout", "reasoning_effort",
-                   "service_tier")
+                   "service_tier", "provider")
+PROVIDER_FIELDS = ("url", "dialect", "login", "max_concurrency", "probe", "metered", "timeout", "connect_timeout",
+                   "json_schema")
 FLOW_FIELDS = ("aliases", "pool", "fallback", "fallback_on", "auth", "allow_metered_unauthenticated",
                "queue_timeout", "first_token_timeout", "background_max_lanes", "affinity", "context",
                "input_modalities", "description")
@@ -126,6 +129,17 @@ def _apply_fields(target: CommentedMap, fields: dict, allowed: tuple[str, ...], 
             _put(target, f, v)
 
 
+def _providers_section(doc: CommentedMap) -> CommentedMap:
+    """The providers map, created just before `endpoints` so the file reads top-down."""
+    sec = doc.get("providers")
+    if isinstance(sec, dict):
+        return sec
+    sec = CommentedMap()
+    keys = list(doc.keys())
+    doc.insert(keys.index("endpoints") if "endpoints" in keys else len(keys), "providers", sec)
+    return sec
+
+
 def _flows_using(doc: CommentedMap, endpoint: str) -> list[str]:
     return [name for name, m in (doc.get("models") or {}).items()
             if endpoint in list((m or {}).get("pool") or []) + list((m or {}).get("fallback") or [])]
@@ -198,8 +212,14 @@ class ConfigEditor:
                             clear_key: bool = False) -> Config:
         name = _check_name(name, "model")
         fields = dict(fields)
-        if create and not str(fields.get("url") or "").strip():
-            raise EditError("a URL is required")
+        via = str(fields.get("provider") or "").strip() or None
+        if via:
+            # the connection comes from the provider: drop whatever the form sent for it
+            for f in CONNECTION_FIELDS:
+                fields.pop(f, None)
+            key, clear_key = None, True
+        elif create and not str(fields.get("url") or "").strip():
+            raise EditError("a URL, or a provider to take it from, is required")
         if "dialect" in fields and fields["dialect"] not in DIALECTS:
             raise EditError(f"API type must be one of {DIALECTS}")
         if fields.get("probe") not in (None, "", *PROBES):
@@ -216,6 +236,9 @@ class ConfigEditor:
             if ep is None:
                 ep = CommentedMap()
             _apply_fields(ep, fields, ENDPOINT_FIELDS)
+            if via:
+                for f in CONNECTION_FIELDS:
+                    ep.pop(f, None)
             if key_file or clear_key:
                 for k in ("key", "key_env", "key_file"):
                     ep.pop(k, None)
@@ -249,6 +272,58 @@ class ConfigEditor:
 
         cfg = await self.edit(fn)
         self._key_path(name).unlink(missing_ok=True)
+        return cfg
+
+    # ---------------------------------------------------------------- providers (API accounts)
+    async def save_provider(self, name: str, fields: dict, *, create: bool, key: str | None = None,
+                            clear_key: bool = False) -> Config:
+        name = _check_name(name, "provider")
+        fields = dict(fields)
+        if create and not str(fields.get("url") or "").strip():
+            raise EditError("a URL is required")
+        if "dialect" in fields and fields["dialect"] not in DIALECTS:
+            raise EditError(f"API type must be one of {DIALECTS}")
+        key_file = self._write_key("provider-" + name, key) if key else None
+
+        def fn(doc: CommentedMap) -> None:
+            pvs = _providers_section(doc)
+            if create and name in pvs:
+                raise EditError(f"there's already a provider called {name!r}")
+            if not create and name not in pvs:
+                raise EditError(f"no provider called {name!r}")
+            pv = pvs.get(name) if not create else CommentedMap()
+            if pv is None:
+                pv = CommentedMap()
+                pvs[name] = pv
+            _apply_fields(pv, fields, PROVIDER_FIELDS)
+            if key_file or clear_key:
+                for k in ("key", "key_env", "key_file"):
+                    pv.pop(k, None)
+                if key_file:
+                    _put(pv, "key_file", str(key_file))
+            if create:
+                _put(pvs, name, pv)
+
+        cfg = await self.edit(fn)
+        if clear_key:
+            self._key_path("provider-" + name).unlink(missing_ok=True)
+        return cfg
+
+    async def delete_provider(self, name: str) -> Config:
+        def fn(doc: CommentedMap) -> None:
+            pvs = doc.get("providers") or {}
+            if name not in pvs:
+                raise EditError(f"no provider called {name!r}")
+            using = [n for n, e in (doc.get("endpoints") or {}).items() if (e or {}).get("provider") == name]
+            if using:
+                raise EditError(f"{', '.join(using)} {'comes' if len(using) == 1 else 'come'} from {name}; "
+                                "remove or move those models first")
+            del pvs[name]
+            if not pvs:
+                del doc["providers"]
+
+        cfg = await self.edit(fn)
+        self._key_path("provider-" + name).unlink(missing_ok=True)
         return cfg
 
     # ---------------------------------------------------------------- flows ("models" in the config)

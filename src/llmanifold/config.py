@@ -28,6 +28,33 @@ class ConfigError(ValueError):
     pass
 
 
+# the connection to an API: an endpoint naming a provider takes these from it and may not set them itself
+CONNECTION_FIELDS = ("url", "dialect", "login", "key", "key_env", "key_file", "headers")
+# also taken from the provider, unless the endpoint sets its own
+SHARED_FIELDS = ("probe", "metered", "timeout", "connect_timeout", "stream_usage", "json_schema")
+
+
+@dataclass
+class Provider:
+    """One account with a remote API (a URL plus its key or sign-in). Several endpoints can
+    serve different models from it, so the key is entered and the sign-in done once."""
+    name: str
+    url: str
+    dialect: str = "openai"
+    login: str | None = None       # "chatgpt": a ChatGPT (Codex) sign-in instead of a key
+    key: str | None = None
+    key_env: str | None = None
+    key_file: str | None = None
+    headers: dict[str, str] = field(default_factory=dict)
+    max_concurrency: int | None = None   # requests in flight across all its endpoints; None: no shared limit
+    probe: str = "none"
+    metered: bool = True
+    timeout: float = 1800.0
+    connect_timeout: float = 5.0
+    stream_usage: bool = True
+    json_schema: str | None = None
+
+
 @dataclass
 class Endpoint:
     name: str
@@ -53,6 +80,12 @@ class Endpoint:
     json_schema: str | None = None # response_format json_schema: "native" passes it through; "emulate" uses JSON
                                    # mode, checks the reply and asks again if it doesn't fit. Default: emulate for DeepSeek
     headers: dict[str, str] = field(default_factory=dict)
+    provider: str | None = None    # take the URL, key or sign-in (and defaults) from this provider
+
+    @property
+    def account(self) -> str:
+        """Whose key or sign-in this endpoint uses: its provider's, or its own."""
+        return self.provider or self.name
 
     @property
     def is_deepseek(self) -> bool:
@@ -133,6 +166,7 @@ class Config:
     history_days: int = 30
     keepalive_after: float = 15.0        # start sending keepalives after this long without bytes
     health_interval: float = 10.0
+    providers: dict[str, Provider] = field(default_factory=dict)
     endpoints: dict[str, Endpoint] = field(default_factory=dict)
     models: dict[str, Model] = field(default_factory=dict)
     webhooks: list[Webhook] = field(default_factory=list)
@@ -168,6 +202,24 @@ def _take(d: dict, cls, name: str, known: set[str], what: str) -> dict:
     return d
 
 
+def _base_url(url: str) -> str:
+    url = str(url).rstrip("/")
+    return url[:-3] if url.endswith("/v1") else url
+
+
+def _check_connection(c, what: str) -> None:
+    if c.dialect not in DIALECTS:
+        raise ConfigError(f"{what} {c.name!r}: dialect must be one of {DIALECTS}")
+    if c.login is not None and c.login not in LOGINS:
+        raise ConfigError(f"{what} {c.name!r}: login must be one of {LOGINS}")
+    if c.login == "chatgpt" and c.dialect != "responses":
+        raise ConfigError(f"{what} {c.name!r}: a ChatGPT sign-in needs dialect: responses")
+    if c.probe not in PROBES:
+        raise ConfigError(f"{what} {c.name!r}: probe must be one of {PROBES}")
+    if c.json_schema is not None and c.json_schema not in JSON_SCHEMA_MODES:
+        raise ConfigError(f"{what} {c.name!r}: json_schema must be one of {JSON_SCHEMA_MODES}")
+
+
 def parse(raw: dict[str, Any], path: str | None = None) -> Config:
     if not isinstance(raw, dict):
         raise ConfigError("config root must be a mapping")
@@ -182,27 +234,41 @@ def parse(raw: dict[str, Any], path: str | None = None) -> Config:
     cfg.priority_header = str(raw.get("priority_header", cfg.priority_header))
     cfg.default_model = raw.get("default_model") or None
 
+    pv_keys = set(Provider.__dataclass_fields__) - {"name"}
+    for name, d in (raw.get("providers") or {}).items():
+        d = _take(dict(d or {}), Provider, name, pv_keys, "provider")
+        if "url" not in d:
+            raise ConfigError(f"provider {name!r}: url is required")
+        pv = Provider(name=name, **d)
+        pv.url = _base_url(pv.url)
+        _check_connection(pv, "provider")
+        if pv.max_concurrency is not None and pv.max_concurrency < 1:
+            raise ConfigError(f"provider {name!r}: max_concurrency must be >= 1")
+        cfg.providers[name] = pv
+
     ep_keys = set(Endpoint.__dataclass_fields__) - {"name"}
     for name, d in (raw.get("endpoints") or {}).items():
         d = _take(dict(d or {}), Endpoint, name, ep_keys, "endpoint")
+        if d.get("provider") is not None:
+            pv = cfg.providers.get(d["provider"])
+            if pv is None:
+                raise ConfigError(f"endpoint {name!r}: unknown provider {d['provider']!r}")
+            own = sorted(set(d) & set(CONNECTION_FIELDS))
+            if own:
+                raise ConfigError(f"endpoint {name!r}: {', '.join(own)} come from provider {pv.name!r}; "
+                                  "set them there")
+            d = {**{f: getattr(pv, f) for f in CONNECTION_FIELDS + SHARED_FIELDS}, **d}
+            d["headers"] = dict(pv.headers)
         if "url" not in d:
-            raise ConfigError(f"endpoint {name!r}: url is required")
+            raise ConfigError(f"endpoint {name!r}: url (or a provider) is required")
         ep = Endpoint(name=name, **d)
-        ep.url = ep.url.rstrip("/")
-        if ep.url.endswith("/v1"):
-            ep.url = ep.url[:-3]
-        if ep.dialect not in DIALECTS:
-            raise ConfigError(f"endpoint {name!r}: dialect must be one of {DIALECTS}")
-        if ep.login is not None and ep.login not in LOGINS:
-            raise ConfigError(f"endpoint {name!r}: login must be one of {LOGINS}")
-        if ep.login == "chatgpt" and ep.dialect != "responses":
-            raise ConfigError(f"endpoint {name!r}: a ChatGPT sign-in needs dialect: responses")
-        if ep.probe not in PROBES:
-            raise ConfigError(f"endpoint {name!r}: probe must be one of {PROBES}")
+        if ep.provider is None and ep.login and name in cfg.providers:
+            raise ConfigError(f"endpoint {name!r} signs in on its own but shares its name with a provider; "
+                              f"rename it or give it provider: {name}")
+        ep.url = _base_url(ep.url)
+        _check_connection(ep, "endpoint")
         if ep.reasoning_effort is not None and ep.reasoning_effort not in REASONING_EFFORTS:
             raise ConfigError(f"endpoint {name!r}: reasoning_effort must be one of {REASONING_EFFORTS}")
-        if ep.json_schema is not None and ep.json_schema not in JSON_SCHEMA_MODES:
-            raise ConfigError(f"endpoint {name!r}: json_schema must be one of {JSON_SCHEMA_MODES}")
         if ep.max_concurrency < 1:
             raise ConfigError(f"endpoint {name!r}: max_concurrency must be >= 1")
         if ep.overflow_at is not None and (not isinstance(ep.overflow_at, int) or ep.overflow_at < 1):

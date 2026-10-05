@@ -43,7 +43,7 @@ WORDS = ("the lane is clear and the queue is short so the answer comes back at o
 
 
 # ---------------------------------------------------------------- fake engines
-def fake_engine(speed: float) -> web.Application:
+def fake_engine(speed: float, ids: tuple[str, ...] = ("fake",)) -> web.Application:
     """An OpenAI-compatible engine that streams words for as long as the client listens."""
     async def chat(req: web.Request):
         body = await req.json()
@@ -65,7 +65,7 @@ def fake_engine(speed: float) -> web.Application:
         return resp
 
     async def models(_):
-        return web.json_response({"object": "list", "data": [{"id": "fake"}]})
+        return web.json_response({"object": "list", "data": [{"id": i} for i in ids]})
 
     app = web.Application()
     app.router.add_post("/v1/chat/completions", chat)
@@ -124,18 +124,24 @@ def seed_history(store: Store, now: float) -> None:
 async def build(tmp: Path):
     runners, urls = [], {}
     for name, speed in (("gpu0", 46), ("gpu1", 44), ("gpu2", 120), ("deepseek", 34), ("chatgpt", 38), ("claude", 70)):
-        r, urls[name] = await start(fake_engine(speed))
+        ids = ("deepseek-chat", "deepseek-reasoner", "deepseek-v4") if name == "deepseek" else ("fake",)
+        r, urls[name] = await start(fake_engine(speed, ids))
         runners.append(r)
     (tmp / "k.key").write_text("sk-example")
     raw = {
         "listen": {"api": "127.0.0.1:0", "admin": "127.0.0.1:0"}, "data_dir": str(tmp / "data"), "keepalive_after": 0,
         "default_model": "local-large",
+        "providers": {
+            "deepseek": {"url": urls["deepseek"], "key_file": str(tmp / "k.key"), "max_concurrency": 12, "probe": "none"},
+        },
         "endpoints": {
             "gpu0": {"url": urls["gpu0"], "max_concurrency": 1, "context": 262144, "probe": "models"},
             "gpu1": {"url": urls["gpu1"], "max_concurrency": 1, "context": 262144, "probe": "models"},
             "gpu2": {"url": urls["gpu2"], "max_concurrency": 4, "context": 32768, "probe": "models"},
-            "deepseek": {"url": urls["deepseek"], "model": "deepseek-chat", "key_file": str(tmp / "k.key"), "max_concurrency": 8,
-                         "context": 65536, "metered": True, "fallback": True, "overflow_at": 3, "probe": "none"},
+            "deepseek": {"provider": "deepseek", "model": "deepseek-chat", "max_concurrency": 8,
+                         "context": 65536, "fallback": True, "overflow_at": 3},
+            "deepseek-r": {"provider": "deepseek", "model": "deepseek-reasoner", "max_concurrency": 4,
+                           "context": 65536, "fallback": True, "reasoning_effort": "high"},
             "chatgpt": {"url": urls["chatgpt"], "model": "gpt-5.5", "key_file": str(tmp / "k.key"), "max_concurrency": 4,
                         "metered": True, "fallback": True, "probe": "none"},
             "claude": {"url": urls["claude"], "model": "claude-sonnet-4-5", "key_file": str(tmp / "k.key"),
@@ -238,6 +244,20 @@ async def screenshots(browser, admin: str, out: Path) -> None:
     await page.set_viewport_size({"width": 1440, "height": 960})
     await page.wait_for_timeout(300)
     await shot(page, "add-model.png")
+    await page.keyboard.press("Escape")
+
+    await page.click("#add-provider")
+    await page.wait_for_selector("#provider-dialog[open]")
+    await page.wait_for_timeout(300)
+    await shot(page, "add-provider.png")
+    await page.keyboard.press("Escape")
+
+    await page.click('button[data-add-from="deepseek"]')
+    await page.wait_for_selector("#model-dialog[open]")
+    await page.fill('#model-form input[name="name"]', "deepseek-v4")
+    await page.wait_for_selector("#model-pick:not([hidden])")
+    await page.wait_for_timeout(300)
+    await shot(page, "add-from-provider.png")
     await page.keyboard.press("Escape")
 
     await page.click('a[data-view="overview"]')

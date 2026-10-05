@@ -266,12 +266,13 @@ class Core:
         self.router.update(cfg)
         self.reload_error = None
 
-    def _signed_in(self, name: str) -> None:
-        st = self.router.states.get(name)
-        if st is not None:
-            st.mark_ok()
-            st.last_error = None
-            self.router.wake()
+    def _signed_in(self, account: str) -> None:
+        """A sign-in finished: every endpoint using that account can serve again."""
+        for st in self.router.states.values():
+            if st.cfg.account == account:
+                st.mark_ok()
+                st.last_error = None
+        self.router.wake()
 
     async def set_paused(self, name: str, paused: bool, by: str | None) -> bool:
         """Pause (stop routing new requests to) or resume an endpoint. Survives restarts."""
@@ -326,7 +327,7 @@ class Core:
         ep = st.cfg
         if ep.login:
             # signed-in endpoints have no cheap health check; their sign-in is the health
-            s = self.chatgpt.status(ep.name)
+            s = self.chatgpt.status(ep.account)
             if s["signed_in"] and not s.get("last_error"):
                 if not st.healthy or st.last_error:
                     st.mark_ok()
@@ -421,7 +422,7 @@ class Core:
         ep = st.cfg
         url = ep.url.split("/backend-api/", 1)[0] + "/backend-api/wham/usage"
         try:
-            headers = await self.chatgpt.headers(ep.name)
+            headers = await self.chatgpt.headers(ep.account)
             async with self.session.get(url, headers={**headers, "originator": "llmanifold", **ep.headers},
                                         timeout=aiohttp.ClientTimeout(total=10)) as r:
                 if r.status != 200:
@@ -436,11 +437,21 @@ class Core:
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, AttributeError):
             pass     # keep the last figure
 
+    async def _balance_once(self) -> None:
+        """Check each account once: endpoints sharing a provider share its balance and quota."""
+        by_account: dict[str, list[EndpointState]] = {}
+        for st in list(self.router.states.values()):
+            by_account.setdefault(st.cfg.account, []).append(st)
+        firsts = [group[0] for group in by_account.values()]
+        await asyncio.gather(*(self.balance(st) for st in firsts), return_exceptions=True)
+        for group in by_account.values():
+            for st in group[1:]:
+                st.balance, st.quota = group[0].balance, group[0].quota
+
     async def _balance_loop(self) -> None:
         while True:
             try:
-                await asyncio.gather(*(self.balance(st) for st in list(self.router.states.values())),
-                                     return_exceptions=True)
+                await self._balance_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -692,7 +703,7 @@ class Core:
         for attempt in (1, 2):
             if ep.login == "chatgpt":
                 try:
-                    headers.update(await self.chatgpt.headers(ep.name, force_refresh=attempt == 2))
+                    headers.update(await self.chatgpt.headers(ep.account, force_refresh=attempt == 2))
                 except LoginError as e:
                     st.mark_failure(str(e), immediate=True)
                     return Outcome(False, "connect", error=f"{ep.name}: {e}")

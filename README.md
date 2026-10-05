@@ -117,8 +117,15 @@ either kind of upstream.
 - **Dialects.** `/v1/chat/completions` and `/v1/messages` both work against
   either kind of upstream, streaming included: messages, system prompts, tools
   and tool results, images, stop sequences, usage.
-- **ChatGPT plans via Codex.** An endpoint with `dialect: responses` speaks
-  OpenAI's Responses API; add `login: chatgpt` and point it at
+- **Providers: one key or sign-in, many models.** A provider is an account
+  with a remote API (URL plus key, or a ChatGPT sign-in). Endpoints that name
+  it take the connection from it and set only their own model name, thinking
+  level and limits, so adding another model from DeepSeek or Codex is one
+  short form, not another key or another sign-in. The balance or plan quota is
+  checked once per provider, and an optional `max_concurrency` on the provider
+  caps requests across all its models.
+- **ChatGPT plans via Codex.** A provider (or endpoint) with `dialect: responses`
+  speaks OpenAI's Responses API; add `login: chatgpt` and point it at
   `https://chatgpt.com/backend-api/codex` to serve requests from a ChatGPT
   plan, the way the Codex CLI does. Sign in from the admin site with a device
   code (or paste a Codex `auth.json`); tokens refresh by themselves and are
@@ -173,20 +180,32 @@ week, with the latest failures and fallbacks listed below.
   <img src="docs/img/requests.png" alt="Requests view: traffic per model, output speed and time to first token over 24 hours" width="100%">
 </p>
 
-**Models and tokens** lists everything a request can be sent to, which flows are
-open and which need a token, and the tokens themselves. Tokens are created,
-scoped and revoked here.
+**Models and tokens** lists the providers (API accounts), everything a request
+can be sent to, which flows are open and which need a token, and the tokens
+themselves. Tokens are created, scoped and revoked here.
 
 <p align="center">
   <img src="docs/img/models.png" alt="Models and tokens view: endpoints, per-flow access and tokens" width="100%">
 </p>
 
-Adding a paid API is a form with presets and a connection test. The key you type
-is written to a file only llmanifold can read, never to the config file.
+Adding a paid API starts with a provider: a form with presets and a connection
+test, where you type the key or sign in to ChatGPT once. The key is written to a
+file only llmanifold can read, never to the config file.
 
 <p align="center">
-  <img src="docs/img/add-model.png" alt="Add a model dialog with the DeepSeek preset" width="78%">
+  <img src="docs/img/add-provider.png" alt="Add a provider dialog with the ChatGPT (Codex) preset" width="78%">
 </p>
+
+Then **Add model** on the provider asks only for what differs per model: its
+name, the model to ask for (picked from the list the API offers), lanes,
+thinking level and fallback behaviour.
+
+<p align="center">
+  <img src="docs/img/add-from-provider.png" alt="Add a model from the deepseek provider, with the models the API offers" width="78%">
+</p>
+
+An engine on your own network, or an API you only use once, can still be added
+with its own address and key.
 
 <img src="docs/img/dashboard-mobile.png" align="right" width="230" alt="The dashboard on a phone">
 
@@ -217,25 +236,30 @@ The admin site calls endpoints **models** and config models **alias flows**.
 Pausing a model (from the site, `ctl drain`, or Rook) survives restarts.
 
 ```yaml
+providers:
+  deepseek: {url: https://api.deepseek.com, key_env: DEEPSEEK_API_KEY, metered: true}
+  codex: {url: https://chatgpt.com/backend-api/codex, dialect: responses, login: chatgpt, max_concurrency: 6}
+
 endpoints:
   gpu0: {url: http://127.0.0.1:8080, max_concurrency: 1, context: 262144, probe: llamacpp}
   gpu1: {url: http://127.0.0.1:8081, max_concurrency: 1, context: 262144, probe: llamacpp}
-  deepseek:
-    url: https://api.deepseek.com
-    model: deepseek-chat
-    key_env: DEEPSEEK_API_KEY
-    metered: true
-    fallback: true
+  ds-flash: {provider: deepseek, model: deepseek-chat, fallback: true}
+  codex-a: {provider: codex, model: gpt-5.5, fallback: true}
+  codex-b: {provider: codex, model: gpt-5.5-mini, reasoning_effort: low, fallback: true}
 
 models:
   local-large:
     aliases: [default]
     pool: [gpu0, gpu1]
-    fallback: [deepseek]
+    fallback: [ds-flash, codex-a]
     background_max_lanes: 1
 ```
 
-API keys come from `key_env` or `key_file`; avoid literal `key:` values.
+API keys come from `key_env` or `key_file`; avoid literal `key:` values. An
+endpoint that names a `provider` takes `url`, `dialect`, `login`, the key and
+`headers` from it and may not set them itself; `probe`, `metered`, timeouts and
+`json_schema` also come from the provider unless the endpoint sets its own.
+Endpoints sharing a ChatGPT provider share its one sign-in.
 
 Set `default_model` to route requests that name no model, or one llmanifold
 doesn't know, instead of answering 404 (handy when replacing a single-model

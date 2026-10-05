@@ -186,6 +186,16 @@ class Router:
         return sum(1 for w in self._waiting if model is None or w.model == model)
 
     # ---- selection
+    def has_room(self, st: EndpointState, now: float | None = None) -> bool:
+        """Below its own limit, and below its provider's shared limit if it has one."""
+        if st.load(now) >= st.capacity:
+            return False
+        pv = self.cfg.providers.get(st.cfg.provider) if st.cfg.provider else None
+        if pv is None or pv.max_concurrency is None:
+            return True
+        used = sum(o.inflight for o in self.states.values() if o.cfg.provider == pv.name)
+        return used < pv.max_concurrency
+
     def _pool_states(self, model: Model, min_context: int | None) -> list[EndpointState]:
         out = []
         for n in model.pool:
@@ -210,7 +220,7 @@ class Router:
             if sum(s.bg_inflight for s in cands) >= model.background_max_lanes:
                 return None
         now = time.monotonic()
-        free = [s for s in cands if s.load(now) < s.capacity]
+        free = [s for s in cands if self.has_room(s, now)]
         if not free:
             return None
         pref = self._affinity.get(key) if (key and model.affinity) else None
@@ -260,7 +270,7 @@ class Router:
                     for name, n in overflow:
                         ost = self.states.get(name)
                         if (position >= n and ost is not None and ost.usable
-                                and ost.load() < ost.capacity
+                                and self.has_room(ost)
                                 and not (min_context and ost.cfg.context and ost.cfg.context < min_context)):
                             self._reserve(ost, background, None, rid, desc)
                             return ost
@@ -280,7 +290,7 @@ class Router:
         """Reserve a specific (fallback) endpoint if it has room right now."""
         async with self._cond:
             st = self.states.get(name)
-            if st is None or not st.usable or st.load() >= st.capacity:
+            if st is None or not st.usable or not self.has_room(st):
                 return None
             self._reserve(st, background, None, rid, desc)
             return st

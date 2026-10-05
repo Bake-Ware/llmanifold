@@ -21,7 +21,7 @@ from aiohttp import web
 from . import __version__
 from . import dialects as D
 from .config import DIALECTS, PROBES, TRIGGERS, Config, ConfigError, load
-from .editor import ENDPOINT_FIELDS, FLOW_FIELDS, EditError
+from .editor import ENDPOINT_FIELDS, FLOW_FIELDS, PROVIDER_FIELDS, EditError
 from .proxy import Core, estimate_tokens
 
 log = logging.getLogger("llmanifold")
@@ -285,9 +285,22 @@ def _endpoint_spec(core: Core, name: str) -> dict:
     out["key_set"] = bool(e.api_key())
     out["login"] = e.login
     if e.login == "chatgpt":
-        s = core.chatgpt.status(name)
+        s = core.chatgpt.status(e.account)
         out["chatgpt"] = {k: s.get(k) for k in ("signed_in", "email", "plan", "last_error")}
     out["flows"] = [m.name for m in core.cfg.models.values() if name in m.pool or name in m.fallback]
+    return out
+
+
+def _provider_spec(core: Core, name: str) -> dict:
+    pv = core.cfg.providers[name]
+    out = {f: getattr(pv, f) for f in PROVIDER_FIELDS}
+    out["key"] = ("file" if pv.key_file else "env" if pv.key_env else "literal" if pv.key else None)
+    out["key_set"] = bool(_provider_key(pv))
+    if pv.login == "chatgpt":
+        s = core.chatgpt.status(name)
+        out["chatgpt"] = {k: s.get(k) for k in ("signed_in", "email", "plan", "last_error")}
+    out["endpoints"] = [n for n, e in core.cfg.endpoints.items() if e.provider == name]
+    out["inflight"] = sum(st.inflight for st in core.router.states.values() if st.cfg.provider == name)
     return out
 
 
@@ -296,6 +309,7 @@ async def a_config(request: web.Request) -> web.Response:
     return web.json_response({
         "path": core.cfg.path, "writable": bool(core.editor and core.editor.writable),
         "default_model": core.cfg.default_model,
+        "providers": {n: _provider_spec(core, n) for n in core.cfg.providers},
         "endpoints": {n: _endpoint_spec(core, n) for n in core.cfg.endpoints},
         "flows": {m.name: {f: (list(getattr(m, f)) if isinstance(getattr(m, f), (list, tuple)) else getattr(m, f))
                            for f in FLOW_FIELDS} for m in core.cfg.models.values()},
@@ -365,25 +379,92 @@ async def a_endpoint_test(request: web.Request) -> web.Response:
         return web.json_response({"error": "a URL is required"}, status=400)
     key = str(b.get("key") or "").strip() or None
     login_of = None
-    if b.get("login") == "chatgpt":
-        login_of = b.get("name") if b.get("name") in core.cfg.endpoints else None
+    if b.get("provider") in core.cfg.providers:      # a model taking its connection from a provider
+        pv = core.cfg.providers[b["provider"]]
+        url, login_of = pv.url, (pv.name if pv.login == "chatgpt" else None)
+        b["dialect"] = pv.dialect
+        if login_of is None:
+            key = _provider_key(pv)
+    elif b.get("login") == "chatgpt":
+        ep = core.cfg.endpoints.get(b.get("name"))
+        login_of = ep.account if ep else None
+        if b.get("provider_form"):
+            login_of = b.get("name") if b.get("name") in core.cfg.providers else None
         if login_of is None:
             return web.json_response({"ok": False, "error": "save the model first, then sign in to ChatGPT; "
                                                             "the test runs with that sign-in"})
+    elif key is None and b.get("provider_form") and b.get("name") in core.cfg.providers:
+        key = _provider_key(core.cfg.providers[b["name"]])
     elif key is None and b.get("name") in core.cfg.endpoints:
         key = core.cfg.endpoints[b["name"]].api_key()
     return web.json_response(await core.test_endpoint(url, b.get("dialect") or "openai", key, login_of))
 
 
-# ---- ChatGPT (Codex) sign-in, people only
+def _provider_key(pv) -> str | None:
+    if pv.key:
+        return pv.key
+    if pv.key_env and os.environ.get(pv.key_env):
+        return os.environ[pv.key_env]
+    if pv.key_file:
+        try:
+            return Path(pv.key_file).expanduser().read_text().strip() or None
+        except OSError:
+            return None
+    return None
+
+
+async def a_provider_models(request: web.Request) -> web.Response:
+    core = request.app[CORE]
+    pv = core.cfg.providers.get(request.match_info["name"])
+    if pv is None:
+        return web.json_response({"error": "no such provider"}, status=404)
+    login_of = pv.name if pv.login == "chatgpt" else None
+    return web.json_response(await core.test_endpoint(pv.url, pv.dialect, None if login_of else _provider_key(pv),
+                                                      login_of))
+
+
+def _split_provider_body(b: dict) -> tuple[dict, str | None, bool]:
+    fields = {k: b[k] for k in PROVIDER_FIELDS if k in b}
+    key = str(b.get("key") or "").strip() or None
+    return fields, key, bool(b.get("clear_key"))
+
+
+async def a_provider_create(request: web.Request) -> web.Response:
+    b = await _body(request)
+    fields, key, clear = _split_provider_body(b)
+    return await _config_edit(request, f"add provider {b.get('name')}", lambda ed: ed.save_provider(
+        str(b.get("name") or ""), fields, create=True, key=key, clear_key=clear))
+
+
+async def a_provider_update(request: web.Request) -> web.Response:
+    b = await _body(request)
+    fields, key, clear = _split_provider_body(b)
+    name = request.match_info["name"]
+    return await _config_edit(request, f"edit provider {name}", lambda ed: ed.save_provider(
+        name, fields, create=False, key=key, clear_key=clear))
+
+
+async def a_provider_delete(request: web.Request) -> web.Response:
+    name = request.match_info["name"]
+    return await _config_edit(request, f"remove provider {name}", lambda ed: ed.delete_provider(name))
+
+
+# ---- ChatGPT (Codex) sign-in, people only. A sign-in belongs to an account: a provider, or a
+# model with its own connection. Asking through a model that uses a provider reaches the provider's.
 
 def _chatgpt_endpoint(request: web.Request):
     core = request.app[CORE]
     name = request.match_info["name"]
+    if request.path.startswith("/api/providers/"):
+        pv = core.cfg.providers.get(name)
+        if pv is None or pv.login != "chatgpt":
+            return None, web.json_response({"error": f"{name!r} isn't a provider that signs in with ChatGPT"},
+                                           status=404)
+        return name, None
     ep = core.cfg.endpoints.get(name)
     if ep is None or ep.login != "chatgpt":
         return None, web.json_response({"error": f"{name!r} isn't a model that signs in with ChatGPT"}, status=404)
-    return name, None
+    return ep.account, None
 
 
 async def a_chatgpt_status(request: web.Request) -> web.Response:
@@ -418,9 +499,7 @@ async def a_chatgpt_import(request: web.Request) -> web.Response:
         await core.chatgpt.headers(name)          # proves the refresh token works
     except LoginError as e:
         return web.json_response({"error": str(e)}, status=400)
-    st = core.router.states.get(name)
-    if st:
-        st.mark_ok()
+    core._signed_in(name)
     return web.json_response(core.chatgpt.status(name))
 
 
@@ -570,6 +649,14 @@ def build_admin_app(core: Core) -> web.Application:
     r.add_post("/api/endpoints/{name}/chatgpt/start", a_chatgpt_start)
     r.add_post("/api/endpoints/{name}/chatgpt/import", a_chatgpt_import)
     r.add_delete("/api/endpoints/{name}/chatgpt", a_chatgpt_logout)
+    r.add_post("/api/providers", a_provider_create)
+    r.add_put("/api/providers/{name}", a_provider_update)
+    r.add_delete("/api/providers/{name}", a_provider_delete)
+    r.add_get("/api/providers/{name}/models", a_provider_models)
+    r.add_get("/api/providers/{name}/chatgpt", a_chatgpt_status)
+    r.add_post("/api/providers/{name}/chatgpt/start", a_chatgpt_start)
+    r.add_post("/api/providers/{name}/chatgpt/import", a_chatgpt_import)
+    r.add_delete("/api/providers/{name}/chatgpt", a_chatgpt_logout)
     r.add_put("/api/endpoints/{name}", a_endpoint_update)
     r.add_delete("/api/endpoints/{name}", a_endpoint_delete)
     r.add_post("/api/flows", a_flow_create)

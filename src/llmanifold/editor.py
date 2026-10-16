@@ -26,7 +26,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.tokens import CommentToken
 
-from .config import CONNECTION_FIELDS, DIALECTS, MEMBER_LIMITS, PROBES, Config, ConfigError, parse
+from .config import CONNECTION_FIELDS, DIALECTS, HARNESS_DIALECTS, MEMBER_LIMITS, PROBES, Config, ConfigError, parse
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,99}$")
 KEEP_BACKUPS = 20
@@ -226,7 +226,7 @@ class ConfigEditor:
             for f in CONNECTION_FIELDS:
                 fields.pop(f, None)
             key, clear_key = None, True
-        elif create and not str(fields.get("url") or "").strip():
+        elif create and not str(fields.get("url") or "").strip() and fields.get("dialect") not in HARNESS_DIALECTS:
             raise EditError("a URL, or a provider to take it from, is required")
         if "dialect" in fields and fields["dialect"] not in DIALECTS:
             raise EditError(f"API type must be one of {DIALECTS}")
@@ -288,7 +288,7 @@ class ConfigEditor:
                             clear_key: bool = False) -> Config:
         name = _check_name(name, "provider")
         fields = dict(fields)
-        if create and not str(fields.get("url") or "").strip():
+        if create and not str(fields.get("url") or "").strip() and fields.get("dialect") not in HARNESS_DIALECTS:
             raise EditError("a URL is required")
         if "dialect" in fields and fields["dialect"] not in DIALECTS:
             raise EditError(f"API type must be one of {DIALECTS}")

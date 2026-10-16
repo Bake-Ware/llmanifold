@@ -4,6 +4,10 @@
 (() => {
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+  // agent CLIs run on the llmanifold host: no address; only Claude Code takes a key (a `claude setup-token` token)
+  const CLI_LABEL = { 'claude-code': 'claude code cli', 'codex-cli': 'codex cli', opencode: 'opencode cli' };
+  const isCli = (d) => d in CLI_LABEL;
+  const where = (sp) => (isCli(sp.dialect) ? 'on this host' : sp.url);
   const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const num = (n) => (n == null ? '–' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : n.toLocaleString());
   const secs = (ms) => (ms == null ? '–' : ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(ms < 10000 ? 2 : 1) + ' s');
@@ -116,7 +120,7 @@
   function laneHtml(e, flow, fallback) {
     const st = laneState(e);
     const tags = [e.metered ? 'paid' : '', fallback ? (e.overflow_at ? `fallback · helps at ${e.overflow_at} waiting` : 'fallback') : '',
-      e.dialect === 'anthropic' ? 'anthropic api' : '']
+      e.dialect === 'anthropic' ? 'anthropic api' : '', CLI_LABEL[e.dialect] || '']
       .filter(Boolean).join(' · ');
     const pause = e.draining
       ? `<button class="small" data-resume="${esc(e.name)}">Resume</button>`
@@ -466,6 +470,7 @@
     out.push(spec.metered ? '<span class="chip warn">paid</span>' : '<span class="chip">local</span>');
     if (spec.fallback) out.push('<span class="chip">fallback only</span>');
     if (spec.dialect === 'anthropic') out.push('<span class="chip">anthropic api</span>');
+    if (isCli(spec.dialect)) out.push(`<span class="chip">${CLI_LABEL[spec.dialect]}</span>`);
     return out.join(' ');
   }
   function signinCell(c) {
@@ -482,9 +487,9 @@
     cfg = await api('/api/config');
     const live = Object.fromEntries(status.endpoints.map((e) => [e.name, e]));
     $('#providers tbody').innerHTML = Object.entries(cfg.providers || {}).map(([n, pv]) => `<tr>
-        <td class="wrap"><b>${esc(n)}</b><div class="chain">${esc(pv.url)}</div></td>
-        <td>${pv.metered ? '<span class="chip warn">paid</span>' : '<span class="chip">free</span>'}${pv.dialect === 'anthropic' ? ' <span class="chip">anthropic api</span>' : ''}</td>
-        <td class="mono">${pv.login === 'chatgpt' ? signinCell(pv.chatgpt) : pv.key_set ? 'set' : '<span class="bad">missing</span>'}</td>
+        <td class="wrap"><b>${esc(n)}</b><div class="chain">${esc(where(pv))}</div></td>
+        <td>${pv.metered ? '<span class="chip warn">paid</span>' : '<span class="chip">free</span>'}${pv.dialect === 'anthropic' ? ' <span class="chip">anthropic api</span>' : ''}${isCli(pv.dialect) ? ` <span class="chip">${CLI_LABEL[pv.dialect]}</span>` : ''}</td>
+        <td class="mono">${pv.login === 'chatgpt' ? signinCell(pv.chatgpt) : pv.key_set ? 'set' : isCli(pv.dialect) ? 'the CLI’s' : '<span class="bad">missing</span>'}</td>
         <td class="mono">${pv.max_concurrency ? `${pv.inflight}/${pv.max_concurrency}` : `${pv.inflight} · no limit`}</td>
         <td class="chain wrap">${pv.endpoints.length ? esc(pv.endpoints.join(', ')) : 'none yet'}</td>
         <td class="actions">
@@ -497,14 +502,14 @@
       const e = live[n] || {};
       const st = e.name ? laneState(e) : 'unknown';
       return `<tr>
-        <td class="wrap"><b>${esc(n)}</b><div class="chain">${sp.provider ? 'from ' + esc(sp.provider) : esc(sp.url)}</div></td>
+        <td class="wrap"><b>${esc(n)}</b><div class="chain">${sp.provider ? 'from ' + esc(sp.provider) : esc(where(sp))}</div></td>
         <td class="mono">${esc(sp.model || 'client’s name')}</td>
         <td>${epKind(sp)}</td>
         <td><span class="state ${st}"><span class="st"></span>${st}</span></td>
         <td class="chain wrap">${sp.flows.length ? esc(sp.flows.join(', ')) : 'no flows'}</td>
         <td class="mono">${sp.provider ? `<span class="muted">${esc(sp.provider)}’s</span>`
           : sp.login === 'chatgpt' ? signinCell(sp.chatgpt)
-          : sp.key_set ? 'set' : sp.metered ? '<span class="bad">missing</span>' : '–'}</td>
+          : sp.key_set ? 'set' : isCli(sp.dialect) ? 'the CLI’s' : sp.metered ? '<span class="bad">missing</span>' : '–'}</td>
         <td class="actions">
           ${e.draining ? `<button class="small" data-resume="${esc(n)}">Resume</button>` : `<button class="small secondary" data-pause="${esc(n)}">Pause</button>`}
           ${sp.login === 'chatgpt' && !sp.provider ? signinButtons(n, 'endpoints', sp.chatgpt) : ''}
@@ -535,6 +540,9 @@
     openai: { name: 'openai', url: 'https://api.openai.com', dialect: 'openai', model: '', max_concurrency: 8, probe: 'models', metered: true, fallback: false },
     codex: { name: 'codex', url: 'https://chatgpt.com/backend-api/codex', dialect: 'responses', login: 'chatgpt', model: 'gpt-5.5', max_concurrency: 4, context: '', probe: 'none', metered: true, fallback: true, overflow_at: 5 },
     openrouter: { name: 'openrouter', url: 'https://openrouter.ai/api', dialect: 'openai', model: '', max_concurrency: 8, probe: 'models', metered: true, fallback: false },
+    'claude-code': { name: 'claude-haiku', url: '', dialect: 'claude-code', model: 'haiku', max_concurrency: 2, probe: 'none', metered: false, fallback: true },
+    'codex-cli': { name: 'codex-cli', url: '', dialect: 'codex-cli', model: '', max_concurrency: 2, probe: 'none', metered: false, fallback: true },
+    opencode: { name: 'opencode', url: '', dialect: 'opencode', model: '', max_concurrency: 2, probe: 'none', metered: false, fallback: true },
     other: { name: '', url: 'https://', dialect: 'openai', model: '', max_concurrency: 4, probe: 'models', metered: true, fallback: false },
   };
   let editing = null;
@@ -543,6 +551,7 @@
     for (const k of ['name', 'url', 'dialect', 'login', 'model', 'max_concurrency', 'context', 'probe', 'overflow_at', 'first_token_timeout', 'reasoning_effort', 'service_tier', 'rate_limit']) {
       if (k in v) f.elements[k].value = v[k] ?? '';
     }
+    if (String(f.elements.url.value).startsWith('cli://')) f.elements.url.value = '';
     for (const k of ['metered', 'fallback']) if (k in v) f.elements[k].checked = !!v[k];
     syncLogin();
   }
@@ -550,14 +559,18 @@
     const f = $('#model-form'), via = f.elements.provider.value, resp = f.elements.dialect.value === 'responses';
     if (!resp) f.elements.login.value = '';
     const chatgpt = f.elements.login.value === 'chatgpt';
+    const cli = isCli(f.elements.dialect.value);
     $$('.own-conn', f).forEach((el) => { el.hidden = !!via; });
-    f.elements.url.required = !via;
+    f.elements.url.required = !via && !cli;
     $('#from-hint').hidden = !via;
     if (via) return;
     $('#preset-field').hidden = !!editing;
+    $('#url-field').hidden = cli;
+    $('#cli-hint').hidden = !cli;
     $('#login-field').hidden = !resp;
     $('#login-hint').hidden = !chatgpt;
-    $('#key-field').hidden = chatgpt;
+    $('#key-field').hidden = chatgpt || (cli && f.elements.dialect.value !== 'claude-code');
+    f.elements.key.placeholder = cli ? 'optional: a claude setup-token token' : 'sk-…';
     $('.clear-key', f).hidden = !(editing && cfg && cfg.endpoints[editing] && cfg.endpoints[editing].key === 'file');
   }
   $('#model-form').elements.provider.addEventListener('change', () => {
@@ -683,22 +696,30 @@
     anthropic: { name: 'anthropic', url: 'https://api.anthropic.com', dialect: 'anthropic', login: '', probe: 'none', metered: true },
     openai: { name: 'openai', url: 'https://api.openai.com', dialect: 'openai', login: '', probe: 'models', metered: true },
     openrouter: { name: 'openrouter', url: 'https://openrouter.ai/api', dialect: 'openai', login: '', probe: 'models', metered: true },
+    'claude-code': { name: 'claude', url: '', dialect: 'claude-code', login: '', probe: 'none', metered: false, max_concurrency: 3 },
+    'codex-cli': { name: 'codex-cli', url: '', dialect: 'codex-cli', login: '', probe: 'none', metered: false, max_concurrency: 3 },
+    opencode: { name: 'opencode', url: '', dialect: 'opencode', login: '', probe: 'none', metered: false, max_concurrency: 3 },
     other: { name: '', url: 'https://', dialect: 'openai', login: '', probe: 'models', metered: true },
   };
   let editingProvider = null;
   function fillProviderForm(v) {
     const f = $('#provider-form');
     for (const k of ['name', 'url', 'dialect', 'login', 'max_concurrency', 'probe']) if (k in v) f.elements[k].value = v[k] ?? '';
+    if (String(f.elements.url.value).startsWith('cli://')) f.elements.url.value = '';
     if ('metered' in v) f.elements.metered.checked = !!v.metered;
     syncProviderLogin();
   }
   function syncProviderLogin() {
     const f = $('#provider-form'), resp = f.elements.dialect.value === 'responses';
     if (!resp) f.elements.login.value = '';
-    const chatgpt = f.elements.login.value === 'chatgpt';
+    const chatgpt = f.elements.login.value === 'chatgpt', cli = isCli(f.elements.dialect.value);
+    f.elements.url.required = !cli;
+    $('#pv-url-field').hidden = cli;
+    $('#pv-cli-hint').hidden = !cli;
     $('#pv-login-field').hidden = !resp;
     $('#pv-login-hint').hidden = !chatgpt;
-    $('#pv-key-field').hidden = chatgpt;
+    $('#pv-key-field').hidden = chatgpt || (cli && f.elements.dialect.value !== 'claude-code');
+    f.elements.key.placeholder = cli ? 'optional: a claude setup-token token' : 'sk-…';
   }
   $('#provider-form').elements.dialect.addEventListener('change', syncProviderLogin);
   $('#provider-form').elements.login.addEventListener('change', syncProviderLogin);

@@ -16,12 +16,14 @@ import logging
 import time
 import uuid
 from collections import deque
+from pathlib import Path
 from dataclasses import dataclass, field
 
 import aiohttp
 from aiohttp import web
 
 from . import dialects as D
+from . import harness as H
 from . import schema as S
 from .config import Config, Model
 from .chatgpt import ChatGPTLogins, LoginError
@@ -215,6 +217,7 @@ class Core:
         self.editor = ConfigEditor(cfg.path, cfg.data_dir) if cfg.path else None
         self.chatgpt = ChatGPTLogins(cfg.data_dir)
         self.chatgpt.on_signed_in = self._signed_in
+        self.harness = H.Status()
         self.session: aiohttp.ClientSession | None = None
         self.recent: deque[dict] = deque(maxlen=500)
         self.started = time.time()
@@ -284,6 +287,8 @@ class Core:
     async def test_endpoint(self, url: str, dialect: str, key: str | None, login_of: str | None = None) -> dict:
         """Ask an endpoint which models it serves: proves the URL and key work before saving.
         `login_of` names an endpoint whose ChatGPT sign-in to use (the Codex backend)."""
+        if H.is_harness(dialect):
+            return await self.test_harness(dialect, key)
         url = url.rstrip("/")
         if url.endswith("/v1"):
             url = url[:-3]
@@ -322,9 +327,28 @@ class Core:
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}".rstrip(": ")}
 
+    async def test_harness(self, dialect: str, token: str | None = None) -> dict:
+        """An agent CLI: is it installed and signed in here, and which models can it use."""
+        t0 = time.monotonic()
+        self.harness.forget(dialect)
+        s = await self.harness.get(dialect)
+        ms = int((time.monotonic() - t0) * 1000)
+        if not s["installed"]:
+            return {"ok": False, "ms": ms, "error": f"{dialect} is not installed on this host (or not on llmanifold's PATH)"}
+        if s["logged_in"] is False and not (token and dialect == "claude-code"):
+            how = {"claude-code": "claude auth login (or a claude setup-token token as the key)",
+                   "codex-cli": "codex login"}.get(dialect, "its own login")
+            return {"ok": False, "ms": ms, "version": s["version"],
+                    "error": f"{dialect} {s['version'] or ''} is installed but not signed in: run {how} "
+                             "as the user llmanifold runs as"}
+        return {"ok": True, "ms": ms, "version": s["version"], "models": await H.models(dialect)}
+
     # ---------------------------------------------------------------- health + busy probes
     async def probe(self, st: EndpointState) -> None:
         ep = st.cfg
+        if H.is_harness(ep.dialect):
+            await self._probe_harness(st)
+            return
         if ep.login:
             # signed-in endpoints have no cheap health check; their sign-in is the health
             s = self.chatgpt.status(ep.account)
@@ -369,6 +393,22 @@ class Core:
             st.mark_failure(f"probe: {type(e).__name__}: {e}".strip(": "))
         self.router.wake()
 
+    async def _probe_harness(self, st: EndpointState) -> None:
+        """An agent CLI is healthy when it is installed and not known to be signed out."""
+        ep = st.cfg
+        s = await self.harness.get(ep.dialect)
+        token = ep.dialect == "claude-code" and bool(ep.api_key())
+        problem = (f"{ep.dialect}: the CLI is not installed on this host" if not s["installed"]
+                   else f"{ep.dialect}: not signed in on this host" if s["logged_in"] is False and not token
+                   else None)
+        if problem:
+            st.healthy = False
+            st.last_error = problem
+        elif not st.healthy or st.last_error:
+            st.mark_ok()
+            st.last_error = None
+        self.router.wake()
+
     async def _probe_loop(self) -> None:
         last_health: dict[str, float] = {}
         while True:
@@ -376,7 +416,7 @@ class Core:
                 now = time.monotonic()
                 jobs = []
                 for st in list(self.router.states.values()):
-                    if st.cfg.probe == "none" and not st.cfg.login:
+                    if st.cfg.probe == "none" and not st.cfg.login and not H.is_harness(st.cfg.dialect):
                         continue
                     busy_probe = st.cfg.probe in ("strata", "llamacpp")
                     due = (now - last_health.get(st.name, 0)) >= self.cfg.health_interval
@@ -659,6 +699,8 @@ class Core:
     async def _attempt(self, ctx: Ctx, st: EndpointState, responder: Responder) -> Outcome:
         ep = st.cfg
         try:
+            if H.is_harness(ep.dialect):
+                return await self._attempt_harness(ctx, st, responder)
             up = D.translate_request(ctx.body, ctx.dialect, ep.dialect)
             up["model"] = ep.model or ctx.model.name
             if ep.reasoning_effort and ep.dialect != "anthropic":
@@ -697,6 +739,31 @@ class Core:
             return await self._call(ctx, st, responder, ep.url + path, up, headers)
         finally:
             await self.router.release(st, ctx.background, ctx.rid)
+
+    async def _attempt_harness(self, ctx: Ctx, st: EndpointState, responder: Responder) -> Outcome:
+        """An agent CLI on this host (Claude Code, Codex, OpenCode): one headless run per request."""
+        ep = st.cfg
+        body = D.translate_request(ctx.body, ctx.dialect, "openai")
+        why = H.unsupported(body)
+        if why:
+            return Outcome(False, "4xx", 400, why)
+        if ep.dialect == "claude-code":
+            token = ep.api_key()
+        else:
+            token = None
+
+        def on_quota(q: list[dict]) -> None:
+            for other in self.router.states.values():     # the plan is shared by the account's models
+                if other.cfg.account == ep.account:
+                    other.quota = q
+
+        chunks = H.run(ep.dialect, body, model=ep.model, effort=ep.reasoning_effort,
+                       workdir=Path(self.cfg.data_dir) / "harness", timeout=ep.timeout, token=token,
+                       on_quota=on_quota)
+        out = await self._relay(ctx, st, responder, chunks, time.monotonic())
+        if not out.ok and out.trigger in ("connect", "429", "5xx"):
+            self.harness.forget(ep.dialect)     # the sign-in may have lapsed: check again on the next probe
+        return out
 
     async def _attempt_responses(self, ctx: Ctx, st: EndpointState, responder: Responder, up: dict) -> Outcome:
         """OpenAI Responses API, with an API key or a ChatGPT (Codex) sign-in."""
@@ -789,7 +856,6 @@ class Core:
         """`capture`: gather the reply into capture["data"] instead of sending it to the client."""
         ep = st.cfg
         t0 = time.monotonic()
-        content_started = False
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=ep.connect_timeout, sock_read=ep.timeout)
         try:
             async with self.session.post(url, json=up, headers=headers, timeout=timeout) as resp:
@@ -799,90 +865,105 @@ class Core:
                     if trig == "5xx":
                         st.mark_failure(f"HTTP {resp.status}")
                     return Outcome(False, trig, resp.status, text[:2000])
-                collect = capture is not None or not ctx.stream   # upstream always streams; non-streaming clients get it gathered up
-                # streaming: hold until real content, so a fast failure can still fall back
-                if collect:
-                    tr = D.stream_translator(ep.dialect, "openai", ctx.requested, include_usage=True)
-                else:
-                    tr = D.stream_translator(ep.dialect, ctx.dialect, ctx.requested,
-                                             include_usage=ctx.include_usage, rename=True,
-                                             strip_usage=ep.stream_usage and not ctx.include_usage)
-                parser = D.SSEParser()
-                held: list[bytes] = []
-                first_deadline = t0 + (ctx.model.limit(ep.name, "first_token_timeout") or ep.first_token_timeout
-                                       or ctx.model.first_token_timeout)
-                ttft = None
-                seen = 0
-                it = resp.content.iter_any().__aiter__()
-                while True:
-                    wait = None if content_started else first_deadline - time.monotonic()
-                    if wait is not None and wait <= 0:
-                        st.mark_slow("no first token before first_token_timeout")
-                        return Outcome(False, "slow", 200, "no first token before first_token_timeout")
-                    try:
-                        chunk = await (asyncio.wait_for(it.__anext__(), wait) if wait is not None else it.__anext__())
-                    except StopAsyncIteration:
-                        break
-                    except asyncio.TimeoutError:
-                        st.mark_slow("no first token before first_token_timeout")
-                        return Outcome(False, "slow", 200, "no first token before first_token_timeout")
-                    outs: list[bytes] = []
-                    for ev in parser.feed(chunk):
-                        outs += tr.feed(*ev)
-                    if tr.deltas > seen:
-                        self._streamed(tr.deltas - seen)
-                        st.streamed(tr.deltas - seen)
-                        seen = tr.deltas
-                    if not content_started:
-                        if tr.error:
-                            return Outcome(False, "5xx", 200, f"upstream stream error: {tr.error}")
-                        held += outs
-                        if tr.has_content and not collect:
-                            ttft = time.monotonic() - t0
-                            await responder.start_stream(st.name)
-                            content_started = True
-                            await responder.write(b"".join(held))
-                            held = []
-                        elif tr.has_content and ttft is None:
-                            ttft = time.monotonic() - t0
-                    elif outs:
-                        await responder.write(b"".join(outs))
-                outs = []
-                for ev in parser.flush():
+                return await self._relay(ctx, st, responder, resp.content.iter_any(), t0, capture)
+        except UPSTREAM_DOWN as e:
+            st.mark_failure(f"{type(e).__name__}: {e}", immediate=True)
+            return Outcome(False, "connect", error=f"{st.name}: {type(e).__name__}")
+        except asyncio.TimeoutError:
+            return Outcome(False, "timeout", error="upstream timed out")
+
+    async def _relay(self, ctx: Ctx, st: EndpointState, responder: Responder, chunks, t0: float,
+                     capture: dict | None = None) -> Outcome:
+        """Relay an upstream event stream (`chunks`: SSE bytes in the endpoint's dialect) to the
+        client, holding it until real content arrives so a failure before that can still fall back."""
+        ep = st.cfg
+        src = "openai" if H.is_harness(ep.dialect) else ep.dialect   # the CLIs' replies come as OpenAI chunks
+        content_started = False
+        it = chunks.__aiter__()
+        try:
+            collect = capture is not None or not ctx.stream   # upstream always streams; non-streaming clients get it gathered up
+            # streaming: hold until real content, so a fast failure can still fall back
+            if collect:
+                tr = D.stream_translator(src, "openai", ctx.requested, include_usage=True)
+            else:
+                tr = D.stream_translator(src, ctx.dialect, ctx.requested,
+                                         include_usage=ctx.include_usage, rename=True,
+                                         strip_usage=ep.stream_usage and not ctx.include_usage)
+            parser = D.SSEParser()
+            held: list[bytes] = []
+            first_deadline = t0 + (ctx.model.limit(ep.name, "first_token_timeout") or ep.first_token_timeout
+                                   or ctx.model.first_token_timeout)
+            ttft = None
+            seen = 0
+            while True:
+                wait = None if content_started else first_deadline - time.monotonic()
+                if wait is not None and wait <= 0:
+                    st.mark_slow("no first token before first_token_timeout")
+                    return Outcome(False, "slow", 200, "no first token before first_token_timeout")
+                try:
+                    chunk = await (asyncio.wait_for(it.__anext__(), wait) if wait is not None else it.__anext__())
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    st.mark_slow("no first token before first_token_timeout")
+                    return Outcome(False, "slow", 200, "no first token before first_token_timeout")
+                outs: list[bytes] = []
+                for ev in parser.feed(chunk):
                     outs += tr.feed(*ev)
-                if collect:
-                    held += outs + tr.finish()
-                    if tr.error:
-                        return Outcome(False, "5xx", 200, f"upstream stream error: {tr.error}")
-                    if not tr.has_content:
-                        return Outcome(False, "empty", 200, "upstream stream ended without content")
-                    data = D.collect_openai_chunks(held, ctx.requested)
-                    if capture is not None:
-                        capture["data"] = data
-                        st.mark_ok()
-                        st.observe(tr.tokens_in, tr.tokens_out, time.monotonic() - t0 - (ttft or 0), ttft)
-                        return Outcome(True, status=200, tokens_in=tr.tokens_in, tokens_out=tr.tokens_out, ttft=ttft)
-                    out = D.translate_response(data, "openai", ctx.dialect, ctx.requested)
-                    await responder.send_json(200, out, st.name)
-                    st.mark_ok()
-                    st.served()
-                    st.observe(tr.tokens_in, tr.tokens_out, time.monotonic() - t0 - (ttft or 0), ttft)
-                    return Outcome(True, status=200, tokens_in=tr.tokens_in, tokens_out=tr.tokens_out,
-                                   ttft=ttft, committed=True)
+                if tr.deltas > seen:
+                    self._streamed(tr.deltas - seen)
+                    st.streamed(tr.deltas - seen)
+                    seen = tr.deltas
                 if not content_started:
                     if tr.error:
                         return Outcome(False, "5xx", 200, f"upstream stream error: {tr.error}")
+                    held += outs
+                    if tr.has_content and not collect:
+                        ttft = time.monotonic() - t0
+                        await responder.start_stream(st.name)
+                        content_started = True
+                        await responder.write(b"".join(held))
+                        held = []
+                    elif tr.has_content and ttft is None:
+                        ttft = time.monotonic() - t0
+                elif outs:
+                    await responder.write(b"".join(outs))
+            outs = []
+            for ev in parser.flush():
+                outs += tr.feed(*ev)
+            if collect:
+                held += outs + tr.finish()
+                if tr.error:
+                    return Outcome(False, "5xx", 200, f"upstream stream error: {tr.error}")
+                if not tr.has_content:
                     return Outcome(False, "empty", 200, "upstream stream ended without content")
-                outs += tr.finish()
-                await responder.write(b"".join(outs))
-                await responder.end()
-                gen = time.monotonic() - t0 - (ttft or 0)
-                tout = tr.tokens_out or tr.deltas
+                data = D.collect_openai_chunks(held, ctx.requested)
+                if capture is not None:
+                    capture["data"] = data
+                    st.mark_ok()
+                    st.observe(tr.tokens_in, tr.tokens_out, time.monotonic() - t0 - (ttft or 0), ttft)
+                    return Outcome(True, status=200, tokens_in=tr.tokens_in, tokens_out=tr.tokens_out, ttft=ttft)
+                out = D.translate_response(data, "openai", ctx.dialect, ctx.requested)
+                await responder.send_json(200, out, st.name)
                 st.mark_ok()
                 st.served()
-                st.observe(tr.tokens_in, tout, gen, ttft)
-                return Outcome(True, status=200, tokens_in=tr.tokens_in, tokens_out=tout,
+                st.observe(tr.tokens_in, tr.tokens_out, time.monotonic() - t0 - (ttft or 0), ttft)
+                return Outcome(True, status=200, tokens_in=tr.tokens_in, tokens_out=tr.tokens_out,
                                ttft=ttft, committed=True)
+            if not content_started:
+                if tr.error:
+                    return Outcome(False, "5xx", 200, f"upstream stream error: {tr.error}")
+                return Outcome(False, "empty", 200, "upstream stream ended without content")
+            outs += tr.finish()
+            await responder.write(b"".join(outs))
+            await responder.end()
+            gen = time.monotonic() - t0 - (ttft or 0)
+            tout = tr.tokens_out or tr.deltas
+            st.mark_ok()
+            st.served()
+            st.observe(tr.tokens_in, tout, gen, ttft)
+            return Outcome(True, status=200, tokens_in=tr.tokens_in, tokens_out=tout,
+                           ttft=ttft, committed=True)
         except CLIENT_GONE:
             return Outcome(False, "client", committed=True, error="client disconnected")
         except asyncio.TimeoutError:
@@ -896,11 +977,19 @@ class Core:
                 await responder.send_error(502, "llmanifold: upstream connection lost")
                 return Outcome(False, "connect", committed=True, error=str(e))
             return Outcome(False, "connect", error=f"{st.name}: {type(e).__name__}")
+        except H.HarnessError as e:
+            if e.trigger in ("connect", "5xx"):
+                st.mark_failure(str(e), immediate=e.trigger == "connect")
+            return Outcome(False, e.trigger, e.status, str(e))
         except aiohttp.ClientPayloadError as e:
             if content_started:
                 await responder.send_error(502, "llmanifold: upstream stream broke")
                 return Outcome(False, "5xx", committed=True, error=str(e))
             return Outcome(False, "5xx", error=str(e))
+        finally:
+            close = getattr(it, "aclose", None)    # a CLI run: stop the process if we gave up on it
+            if close is not None:
+                await close()
 
     # ---------------------------------------------------------------- bookkeeping
     def _finish(self, ctx: Ctx, outcome: Outcome | None, served: EndpointState | None) -> None:

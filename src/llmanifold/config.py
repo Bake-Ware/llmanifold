@@ -14,7 +14,10 @@ from typing import Any
 
 import yaml
 
-DIALECTS = ("openai", "anthropic", "responses")   # responses: OpenAI Responses API (upstream only)
+# responses: OpenAI Responses API (upstream only). The last three are agent CLIs run on this host
+# (llmanifold.harness): no URL, signed in the way the CLI is.
+HARNESS_DIALECTS = ("claude-code", "codex-cli", "opencode")
+DIALECTS = ("openai", "anthropic", "responses", *HARNESS_DIALECTS)
 LOGINS = ("chatgpt",)
 PROBES = ("none", "models", "strata", "llamacpp")
 TRIGGERS = ("connect", "timeout", "slow", "5xx", "429", "4xx", "context", "empty", "schema", "queue")
@@ -221,6 +224,10 @@ def _check_connection(c, what: str) -> None:
         raise ConfigError(f"{what} {c.name!r}: dialect must be one of {DIALECTS}")
     if c.login is not None and c.login not in LOGINS:
         raise ConfigError(f"{what} {c.name!r}: login must be one of {LOGINS}")
+    if c.dialect in HARNESS_DIALECTS:
+        if c.login is not None:
+            raise ConfigError(f"{what} {c.name!r}: {c.dialect} uses the CLI's own sign-in; drop login")
+        c.probe = "none"     # its health is the CLI being installed and signed in
     if c.login == "chatgpt" and c.dialect != "responses":
         raise ConfigError(f"{what} {c.name!r}: a ChatGPT sign-in needs dialect: responses")
     if c.probe not in PROBES:
@@ -246,6 +253,8 @@ def parse(raw: dict[str, Any], path: str | None = None) -> Config:
     pv_keys = set(Provider.__dataclass_fields__) - {"name"}
     for name, d in (raw.get("providers") or {}).items():
         d = _take(dict(d or {}), Provider, name, pv_keys, "provider")
+        if d.get("dialect") in HARNESS_DIALECTS:
+            d.setdefault("url", f"cli://{d['dialect']}")
         if "url" not in d:
             raise ConfigError(f"provider {name!r}: url is required")
         pv = Provider(name=name, **d)
@@ -268,6 +277,8 @@ def parse(raw: dict[str, Any], path: str | None = None) -> Config:
                                   "set them there")
             d = {**{f: getattr(pv, f) for f in CONNECTION_FIELDS + SHARED_FIELDS}, **d}
             d["headers"] = dict(pv.headers)
+        if d.get("dialect") in HARNESS_DIALECTS:
+            d.setdefault("url", f"cli://{d['dialect']}")
         if "url" not in d:
             raise ConfigError(f"endpoint {name!r}: url (or a provider) is required")
         ep = Endpoint(name=name, **d)

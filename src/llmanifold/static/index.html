@@ -199,6 +199,9 @@
         <option value="deepseek">DeepSeek API</option>
         <option value="anthropic">Anthropic API</option>
         <option value="codex">ChatGPT plan, via Codex (sign in with ChatGPT)</option>
+        <option value="claude-code">Claude plan, via the Claude Code CLI on this host</option>
+        <option value="codex-cli">ChatGPT plan, via the Codex CLI on this host</option>
+        <option value="opencode">OpenCode CLI on this host (its own providers)</option>
         <option value="openai">OpenAI API</option>
         <option value="openrouter">OpenRouter</option>
         <option value="other">Another OpenAI-compatible API</option>
@@ -210,12 +213,16 @@
       </label>
       <label class="field own-conn">API type
         <select name="dialect"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option>
-          <option value="responses">OpenAI Responses (Codex)</option></select>
+          <option value="responses">OpenAI Responses (Codex)</option>
+          <option value="claude-code">Claude Code CLI on this host</option><option value="codex-cli">Codex CLI on this host</option>
+          <option value="opencode">OpenCode CLI on this host</option></select>
       </label>
     </div>
-    <label class="field own-conn">Base URL
+    <label class="field own-conn" id="url-field">Base URL
       <input name="url" required placeholder="http://127.0.0.1:8080" inputmode="url">
     </label>
+    <p class="muted small own-conn" id="cli-hint" hidden>Each request runs the CLI once, headless, signed in the way it
+      is for the user llmanifold runs as. It answers text only: requests with tools or images go to the fallbacks.</p>
     <label class="field own-conn" id="login-field" hidden>Sign in with
       <select name="login"><option value="">An API key</option><option value="chatgpt">A ChatGPT account (Codex)</option></select>
     </label>
@@ -299,6 +306,9 @@
     <label class="field" id="pv-preset-field">Start from
       <select name="preset">
         <option value="codex">ChatGPT plan, via Codex (sign in with ChatGPT)</option>
+        <option value="claude-code">Claude plan, via the Claude Code CLI on this host</option>
+        <option value="codex-cli">ChatGPT plan, via the Codex CLI on this host</option>
+        <option value="opencode">OpenCode CLI on this host (its own providers)</option>
         <option value="deepseek">DeepSeek API</option>
         <option value="anthropic">Anthropic API</option>
         <option value="openai">OpenAI API</option>
@@ -312,12 +322,16 @@
       </label>
       <label class="field">API type
         <select name="dialect"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option>
-          <option value="responses">OpenAI Responses (Codex)</option></select>
+          <option value="responses">OpenAI Responses (Codex)</option>
+          <option value="claude-code">Claude Code CLI on this host</option><option value="codex-cli">Codex CLI on this host</option>
+          <option value="opencode">OpenCode CLI on this host</option></select>
       </label>
     </div>
-    <label class="field">Base URL
+    <label class="field" id="pv-url-field">Base URL
       <input name="url" required placeholder="https://api.example.com" inputmode="url">
     </label>
+    <p class="muted small" id="pv-cli-hint" hidden>Each request runs the CLI once, headless, signed in the way it is
+      for the user llmanifold runs as. It answers text only: requests with tools or images go to the fallbacks.</p>
     <label class="field" id="pv-login-field" hidden>Sign in with
       <select name="login"><option value="">An API key</option><option value="chatgpt">A ChatGPT account (Codex)</option></select>
     </label>

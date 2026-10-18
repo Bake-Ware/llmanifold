@@ -24,6 +24,10 @@ providers:
     max_concurrency: 6       # requests in flight across all its models (omit for no shared limit)
     metered: true            # its endpoints count as paid unless they say otherwise
     probe: none
+  # claude-cli:              # a Claude plan through the Claude Code CLI on this host (no url):
+  #   dialect: claude-code   # also codex-cli (ChatGPT plan via `codex exec`) or opencode (OpenCode's own providers)
+  #   max_concurrency: 3     # each request runs the CLI once, signed in as the user llmanifold runs as
+  #   metered: false         # (claude-code only: key_file may hold a `claude setup-token` token instead)
 
 # ---------------------------------------------------------------- endpoints
 # An endpoint is one place a request can be sent. `url` is the base URL
@@ -69,6 +73,12 @@ endpoints:
     reasoning_effort: low
     max_concurrency: 4
     fallback: true
+
+  # haiku-cli:              # a model from the CLI provider above; text only (tools/images go to fallbacks)
+  #   provider: claude-cli
+  #   model: haiku           # claude: haiku | sonnet | opus or a full id; codex-cli: gpt-...; opencode: provider/model
+  #   reasoning_effort: low
+  #   fallback: true
 
   claude:
     url: https://api.anthropic.com

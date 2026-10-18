@@ -130,6 +130,11 @@ either kind of upstream.
   plan, the way the Codex CLI does. Sign in from the admin site with a device
   code (or paste a Codex `auth.json`); tokens refresh by themselves and are
   stored in `<data_dir>/chatgpt/` (mode 600).
+- **Claude Code, Codex and OpenCode as engines.** `dialect: claude-code`,
+  `codex-cli` or `opencode` runs that CLI on the llmanifold host for each
+  request, headless and with its own tools, plugins, MCP servers and session
+  files off, so a Claude plan, a ChatGPT plan or any provider OpenCode knows can
+  answer like a plain model. See [Agent CLIs](#agent-clis).
 - **Limits per flow.** An endpoint's requests at once, requests per minute
   (`rate_limit`), give-up time and backlog help are its defaults; each flow
   can set its own for any of its endpoints (`limits:`), for example letting
@@ -282,6 +287,48 @@ Set `default_model` to route requests that name no model, or one llmanifold
 doesn't know, instead of answering 404 (handy when replacing a single-model
 server whose clients send whatever name they were configured with). The
 "Default flow" checkbox in a flow's Settings sets it from the dashboard.
+
+### Agent CLIs
+
+An endpoint or provider with `dialect: claude-code`, `codex-cli` or `opencode`
+has no URL. Each request runs the CLI once on the llmanifold host
+(`claude -p`, `codex exec`, `opencode run`), signed in the way the CLI is for
+the user llmanifold runs as: run `claude auth login`, `codex login` or
+`opencode auth login` as that user first. For a server without a browser,
+`claude setup-token` makes a long-lived token; give it to the endpoint as its
+key (`key_file`). `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are removed from
+the CLI's environment so a plan, not an API account, is used.
+
+```yaml
+providers:
+  claude-cli: {dialect: claude-code, max_concurrency: 3, metered: false}
+endpoints:
+  haiku-cli: {provider: claude-cli, model: haiku, fallback: true}
+  codex-cli: {dialect: codex-cli, reasoning_effort: low, fallback: true}
+  opencode:  {dialect: opencode, model: kaiju/qwen3-32b, fallback: true}
+```
+
+- `model`: Claude Code takes `haiku`, `sonnet`, `opus` or a full model id;
+  Codex its model slugs (`codex debug models`); OpenCode `provider/model`
+  (`opencode models`). Blank uses the CLI's default. **Test connection** in the
+  admin site lists them.
+- `reasoning_effort` becomes `--effort`, `model_reasoning_effort` or
+  `--variant`.
+- Each CLI runs with no tools of its own: Claude Code with `--tools ""`, no
+  settings or MCP servers; Codex read-only with approvals, web search,
+  apply_patch and the shell off, ignoring `~/.codex/config.toml`; OpenCode
+  with a generated config holding only your model providers (your own config,
+  with its MCP servers and agents, is not loaded). Each run gets a private
+  working directory under `<data_dir>/harness/` that is removed afterwards.
+- They answer text only. A request that offers tools or sends images is
+  refused with a 400 before the CLI starts, so put these behind a flow with
+  `4xx` in `fallback_on` if such clients use it. The conversation is sent as
+  one prompt, and system messages become the system prompt.
+- Claude Code streams tokens; Codex and OpenCode send each finished message
+  whole. A plan's usage limit counts as `429`, a signed-out CLI as `connect`.
+  Claude Code's plan usage shows on the dashboard like a ChatGPT plan's.
+- Health is the CLI being installed and not signed out, re-checked every five
+  minutes and after a failed request.
 
 ### Probes
 

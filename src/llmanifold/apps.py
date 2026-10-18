@@ -20,7 +20,7 @@ from aiohttp import web
 
 from . import __version__
 from . import dialects as D
-from .config import DIALECTS, PROBES, TRIGGERS, Config, ConfigError, load
+from .config import DIALECTS, HARNESS_DIALECTS, PROBES, TRIGGERS, Config, ConfigError, load
 from .editor import ENDPOINT_FIELDS, FLOW_FIELDS, PROVIDER_FIELDS, EditError
 from .proxy import Core, estimate_tokens
 
@@ -377,7 +377,7 @@ async def a_endpoint_test(request: web.Request) -> web.Response:
     core = request.app[CORE]
     b = await _body(request)
     url = str(b.get("url") or "").strip()
-    if not url:
+    if not url and b.get("dialect") not in HARNESS_DIALECTS and b.get("provider") not in core.cfg.providers:
         return web.json_response({"error": "a URL is required"}, status=400)
     key = str(b.get("key") or "").strip() or None
     login_of = None
